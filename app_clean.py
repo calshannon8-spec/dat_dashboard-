@@ -169,25 +169,53 @@ def fx_map_usd() -> dict:
 
 def fmt_abbrev(v):
     """
-    Format large numbers into human-friendly strings with unit suffix.
-    Examples:
-      1,234,567 -> "$1.23M"
-      2,000,000,000 -> "$2.00B"
-    Negative numbers retain the minus sign. Values under 1M are shown without decimals.
+    Format large numbers into human‑friendly strings using shortened units.
+
+    Rules:
+      • Thousands remain numeric with comma separators (e.g. 1,234).
+      • Values ≥1M and <1B are displayed in millions with no decimals (e.g. 235M).
+      • Values ≥1B and <1T are displayed in billions with two decimals (e.g. 2.45B).
+      • Values ≥1T are displayed in trillions with two decimals (e.g. 1.23T).
+    Negative numbers retain the minus sign. Non-numeric values are returned unchanged.
     """
     try:
         n = float(v)
     except Exception:
         return v
     sign = "-" if n < 0 else ""
-    n = abs(n)
-    if n >= 1_000_000_000_000:
-        return f"{sign}${n/1_000_000_000_000:,.2f}T"
-    if n >= 1_000_000_000:
-        return f"{sign}${n/1_000_000_000:,.2f}B"
-    if n >= 1_000_000:
-        return f"{sign}${n/1_000_000:,.2f}M"
-    return f"{sign}${n:,.0f}"
+    n_abs = abs(n)
+    if n_abs >= 1_000_000_000_000:  # trillions
+        return f"{sign}${n_abs/1_000_000_000_000:,.2f}T"
+    elif n_abs >= 1_000_000_000:  # billions
+        return f"{sign}${n_abs/1_000_000_000:,.2f}B"
+    elif n_abs >= 1_000_000:  # millions
+        # Round to nearest million for display with no decimals
+        return f"{sign}${n_abs/1_000_000:,.0f}M"
+    else:  # thousands or less
+        return f"{sign}${n_abs:,.0f}"
+
+
+def _format_number_no_currency(n: float) -> str:
+    """
+    Internal helper to format a numeric value without currency symbol.
+
+    The same rules as fmt_abbrev are applied but without the leading `$`.
+    Used for axis tick labels and chart text where currency symbols may clutter the visuals.
+    """
+    try:
+        value = float(n)
+    except Exception:
+        return str(n)
+    sign = "-" if value < 0 else ""
+    value_abs = abs(value)
+    if value_abs >= 1_000_000_000_000:
+        return f"{sign}{value_abs/1_000_000_000_000:,.2f}T"
+    elif value_abs >= 1_000_000_000:
+        return f"{sign}{value_abs/1_000_000_000:,.2f}B"
+    elif value_abs >= 1_000_000:
+        return f"{sign}{value_abs/1_000_000:,.0f}M"
+    else:
+        return f"{sign}{value_abs:,.0f}"
 
 EXCHANGE_TO_CCY = {
     "NASDAQ": "USD", "NYSE": "USD",
@@ -584,6 +612,19 @@ with tab_overview:
 with tab_charts:
     # Use sub-tabs to organize the charts similar to Blockworks' analytics sections
     st.caption("Select a section below to explore different aspects of the data.")
+    # Add an "Apply to all charts" checkbox to allow ticker selections to propagate
+    # across all charts. When checked, any selection made in one chart updates the
+    # global session state and is used as the default for the other charts.
+    apply_to_all_charts = st.checkbox(
+        "Apply to all charts", key="apply_to_all_charts", help="Propagate ticker selections across all charts"
+    )
+
+    # Initialize a global ticker selection in session_state if not present.
+    # This will hold the most recent selection when apply_to_all_charts is enabled.
+    if "global_ticker_selection" not in st.session_state:
+        st.session_state.global_ticker_selection = []
+
+    # Create sub-tabs for the different chart sections
     sub_tab1, sub_tab2, sub_tab3 = st.tabs([
         "Treasury Composition",
         "Market Cap vs Treasury",
@@ -596,60 +637,139 @@ with tab_charts:
     with sub_tab1:
         st.markdown("#### Top 10 by Treasury (USD)")
         st.caption("Companies with the largest crypto treasury holdings")
-        _top = (
-            df_view[["Ticker", "name", "Treasury USD"]]
-            .dropna()
-            .sort_values("Treasury USD", ascending=False)
-            .head(10)
+
+        # Prepare data for this chart
+        data_top = df_view[["Ticker", "name", "Treasury USD"]].dropna()
+
+        # Determine the full list of tickers and the default selections
+        all_tickers_top = sorted(data_top["Ticker"].dropna().unique().tolist())
+        # Determine Top 10 tickers by Treasury for quick selection
+        top10_tickers_top = (
+            data_top.sort_values("Treasury USD", ascending=False)["Ticker"].head(10).tolist()
+            if not data_top.empty
+            else []
         )
+
+        # Session state key for this chart's ticker selection
+        sel_key_top = "sel_top_tickers"
+
+        # Initialize selection state if not set yet
+        if sel_key_top not in st.session_state:
+            st.session_state[sel_key_top] = all_tickers_top.copy()
+
+        # If Apply to all charts is enabled, sync selection with global state
+        if st.session_state.get("apply_to_all_charts", False):
+            # If a global selection exists, use it; otherwise populate it with current chart's selection
+            if st.session_state.get("global_ticker_selection"):
+                st.session_state[sel_key_top] = st.session_state["global_ticker_selection"]
+            else:
+                st.session_state["global_ticker_selection"] = st.session_state[sel_key_top]
+
+        # Layout: chart on the left, controls on the right
+        chart_col, ctrl_col = st.columns([4, 1], gap="medium")
+        with ctrl_col:
+            # Multi‑select for ticker filtering
+            selected_top = st.multiselect(
+                "Ticker",
+                options=all_tickers_top,
+                default=st.session_state[sel_key_top],
+                key=sel_key_top,
+            )
+            # Update session state with the current selection
+            st.session_state[sel_key_top] = selected_top
+
+            # Quick selection chips: All / None / Top 10
+            chip_all, chip_none, chip_top10 = st.columns(3)
+            if chip_all.button("All", key=f"{sel_key_top}_all"):
+                st.session_state[sel_key_top] = all_tickers_top.copy()
+                selected_top = all_tickers_top.copy()
+                # Update global selection if apply_to_all is active
+                if st.session_state.get("apply_to_all_charts", False):
+                    st.session_state["global_ticker_selection"] = selected_top
+            if chip_none.button("None", key=f"{sel_key_top}_none"):
+                st.session_state[sel_key_top] = []
+                selected_top = []
+                if st.session_state.get("apply_to_all_charts", False):
+                    st.session_state["global_ticker_selection"] = []
+            if chip_top10.button("Top 10", key=f"{sel_key_top}_top10"):
+                st.session_state[sel_key_top] = top10_tickers_top.copy()
+                selected_top = top10_tickers_top.copy()
+                if st.session_state.get("apply_to_all_charts", False):
+                    st.session_state["global_ticker_selection"] = selected_top
+
+            # When apply_to_all_charts is enabled, propagate the current selection to global state
+            if st.session_state.get("apply_to_all_charts", False):
+                st.session_state["global_ticker_selection"] = st.session_state[sel_key_top]
+
+        # Filter the dataset based on the selected tickers
+        selected_tickers_top = st.session_state.get(sel_key_top, all_tickers_top)
+        if selected_tickers_top:
+            filtered_top = data_top[data_top["Ticker"].isin(selected_tickers_top)]
+        else:
+            filtered_top = data_top.copy()
+
+        # Sort by Treasury and take top 10 rows for display
+        _top = (
+            filtered_top.sort_values("Treasury USD", ascending=False).head(10)
+            if not filtered_top.empty
+            else pd.DataFrame(columns=["Ticker", "name", "Treasury USD"])
+        )
+
         if not _top.empty:
             if HAS_PLOTLY:
-                # Compute billions for labels
+                # Compute human‑readable text for each bar
                 _top = _top.copy()
-                _top["Treasury_B"] = _top["Treasury USD"] / 1e9
-                # Determine tick values and labels for B/M formatting
+                _top["value_str"] = _top["Treasury USD"].apply(_format_number_no_currency)
                 max_val_top = _top["Treasury USD"].max() if not _top["Treasury USD"].empty else 0
                 if max_val_top and max_val_top > 0:
                     tickvals_top = np.linspace(0, max_val_top, 5)
-                    ticktext_top = [f"{v/1e9:.2f}B" for v in tickvals_top]
+                    ticktext_top = [_format_number_no_currency(v) for v in tickvals_top]
                 else:
                     tickvals_top = [0]
-                    ticktext_top = ["0B"]
+                    ticktext_top = ["0"]
                 fig_top = px.bar(
                     _top,
                     x="Ticker",
                     y="Treasury USD",
-                    text="Treasury_B",
+                    text="value_str",
                     hover_data=["name"],
                     title=None,
                 )
                 fig_top.update_yaxes(
-                    title="Treasury (B USD)",
+                    title="Treasury (USD)",
                     type="linear",
                     tickmode="array",
                     tickvals=tickvals_top,
                     ticktext=ticktext_top,
                 )
                 fig_top.update_traces(
-                    texttemplate="%{text:.2f}B",
-                    hovertemplate="<b>%{x}</b><br>Treasury: %{text:.2f}B<extra></extra>",
+                    texttemplate="%{text}",
+                    hovertemplate="<b>%{x}</b><br>Treasury: %{text}<extra></extra>",
                 )
-                # Place legend outside if one appears (though bar chart has no legend here)
-                st.plotly_chart(fig_top, use_container_width=True)
+                # Place legend outside if one appears (bar chart has no legend here)
+                chart_col.plotly_chart(fig_top, use_container_width=True)
             else:
+                # Altair fallback
                 chart_top = (
                     alt.Chart(_top)
                     .mark_bar()
                     .encode(
                         x="Ticker:N",
-                        y=alt.Y("Treasury USD:Q", title="Treasury (USD)", scale=alt.Scale(type="linear")),
+                        y=alt.Y(
+                            "Treasury USD:Q",
+                            title="Treasury (USD)",
+                            scale=alt.Scale(type="linear"),
+                            axis=alt.Axis(
+                                format="",  # rely on default for altair; more advanced formatting is difficult
+                            ),
+                        ),
                         tooltip=["Ticker", "name", "Treasury USD"],
                     )
                     .properties(title=None)
                 )
-                st.altair_chart(chart_top, use_container_width=True)
+                chart_col.altair_chart(chart_top, use_container_width=True)
         else:
-            st.info("No rows available for ranking.")
+            chart_col.info("No rows available for ranking.")
 
     # ------------------------------------------------------------------
     # Sub‑tab 2: Market Cap vs Treasury scatter
@@ -657,19 +777,76 @@ with tab_charts:
     with sub_tab2:
         st.markdown("#### Treasury % of Market Cap vs Market Cap")
         st.caption("Relationship between market cap and the share of crypto treasury")
-        _sc = df_view[["Ticker", "name", "Treasury USD", "Mkt Cap (USD)", "% of Mkt Cap"]].dropna()
-        if not _sc.empty:
-            _sc = _sc.assign(pct=_sc["% of Mkt Cap"] / 100.0)
+
+        # Prepare data for this chart
+        scatter_data = df_view[["Ticker", "name", "Treasury USD", "Mkt Cap (USD)", "% of Mkt Cap"]].dropna().copy()
+        if not scatter_data.empty:
+            scatter_data = scatter_data.assign(pct=scatter_data["% of Mkt Cap"] / 100.0)
+
+        # Determine ticker lists for selection
+        all_tickers_sc = sorted(scatter_data["Ticker"].dropna().unique().tolist()) if not scatter_data.empty else []
+        top10_tickers_sc = (
+            scatter_data.sort_values("Mkt Cap (USD)", ascending=False)["Ticker"].head(10).tolist()
+            if not scatter_data.empty
+            else []
+        )
+        sel_key_sc = "sel_scatter_tickers"
+        if sel_key_sc not in st.session_state:
+            st.session_state[sel_key_sc] = all_tickers_sc.copy()
+        # Sync with global state if apply_to_all_charts is enabled
+        if st.session_state.get("apply_to_all_charts", False):
+            if st.session_state.get("global_ticker_selection"):
+                st.session_state[sel_key_sc] = st.session_state["global_ticker_selection"]
+            else:
+                st.session_state["global_ticker_selection"] = st.session_state[sel_key_sc]
+
+        # Layout: chart on the left, controls on the right
+        chart_sc_col, ctrl_sc_col = st.columns([4, 1], gap="medium")
+        with ctrl_sc_col:
+            selected_sc = st.multiselect(
+                "Ticker",
+                options=all_tickers_sc,
+                default=st.session_state[sel_key_sc],
+                key=sel_key_sc,
+            )
+            st.session_state[sel_key_sc] = selected_sc
+            chip_sc_all, chip_sc_none, chip_sc_top = st.columns(3)
+            if chip_sc_all.button("All", key=f"{sel_key_sc}_all"):
+                st.session_state[sel_key_sc] = all_tickers_sc.copy()
+                selected_sc = all_tickers_sc.copy()
+                if st.session_state.get("apply_to_all_charts", False):
+                    st.session_state["global_ticker_selection"] = selected_sc
+            if chip_sc_none.button("None", key=f"{sel_key_sc}_none"):
+                st.session_state[sel_key_sc] = []
+                selected_sc = []
+                if st.session_state.get("apply_to_all_charts", False):
+                    st.session_state["global_ticker_selection"] = []
+            if chip_sc_top.button("Top 10", key=f"{sel_key_sc}_top10"):
+                st.session_state[sel_key_sc] = top10_tickers_sc.copy()
+                selected_sc = top10_tickers_sc.copy()
+                if st.session_state.get("apply_to_all_charts", False):
+                    st.session_state["global_ticker_selection"] = selected_sc
+            if st.session_state.get("apply_to_all_charts", False):
+                st.session_state["global_ticker_selection"] = st.session_state[sel_key_sc]
+
+        # Filter data based on selection
+        selected_tickers_sc = st.session_state.get(sel_key_sc, all_tickers_sc)
+        if selected_tickers_sc:
+            scatter_df = scatter_data[scatter_data["Ticker"].isin(selected_tickers_sc)]
+        else:
+            scatter_df = scatter_data.copy()
+
+        if not scatter_df.empty:
             if HAS_PLOTLY:
-                max_val_sc = _sc["Mkt Cap (USD)"].max() if not _sc["Mkt Cap (USD)"].empty else 0
+                max_val_sc = scatter_df["Mkt Cap (USD)"].max() if not scatter_df["Mkt Cap (USD)"].empty else 0
                 if max_val_sc and max_val_sc > 0:
                     tickvals_sc = np.linspace(0, max_val_sc, 5)
-                    ticktext_sc = [f"{v/1e9:.2f}B" for v in tickvals_sc]
+                    ticktext_sc = [_format_number_no_currency(v) for v in tickvals_sc]
                 else:
                     tickvals_sc = [0]
-                    ticktext_sc = ["0B"]
+                    ticktext_sc = ["0"]
                 fig_sc = px.scatter(
-                    _sc,
+                    scatter_df,
                     x="Mkt Cap (USD)",
                     y="pct",
                     size="Treasury USD",
@@ -678,7 +855,7 @@ with tab_charts:
                     labels={"pct": "% of Market Cap"},
                 )
                 fig_sc.update_xaxes(
-                    title="Market Cap (B USD)",
+                    title="Market Cap (USD)",
                     type="linear",
                     tickmode="array",
                     tickvals=tickvals_sc,
@@ -687,22 +864,26 @@ with tab_charts:
                 fig_sc.update_yaxes(title="% of Market Cap", tickformat=".2%")
                 # Provide a vertical legend if necessary
                 fig_sc.update_layout(legend=dict(orientation="v", y=1, x=1.02))
-                st.plotly_chart(fig_sc, use_container_width=True)
+                chart_sc_col.plotly_chart(fig_sc, use_container_width=True)
             else:
                 chart_sc = (
-                    alt.Chart(_sc)
+                    alt.Chart(scatter_df)
                     .mark_circle()
                     .encode(
-                        x=alt.X("Mkt Cap (USD):Q", title="Market Cap (USD)", scale=alt.Scale(type="linear")),
+                        x=alt.X(
+                            "Mkt Cap (USD):Q",
+                            title="Market Cap (USD)",
+                            scale=alt.Scale(type="linear"),
+                        ),
                         y=alt.Y("pct:Q", title="% of Market Cap"),
                         size="Treasury USD:Q",
                         tooltip=["Ticker", "name", "Treasury USD", "Mkt Cap (USD)", "% of Mkt Cap"],
                     )
                     .properties(title=None)
                 )
-                st.altair_chart(chart_sc, use_container_width=True)
+                chart_sc_col.altair_chart(chart_sc, use_container_width=True)
         else:
-            st.info("Not enough data for scatter.")
+            chart_sc_col.info("Not enough data for scatter.")
 
     # ------------------------------------------------------------------
     # Sub‑tab 3: Liabilities vs Net Crypto NAV
@@ -710,7 +891,63 @@ with tab_charts:
     with sub_tab3:
         st.markdown("#### Liabilities vs Net Crypto NAV")
         st.caption("Compare total liabilities against net crypto NAV across companies")
-        liab_nav_df = df_view[["Ticker", "Total Liabilities", "Net Crypto NAV"]].dropna()
+
+        # Prepare data for this chart
+        liab_nav_base = df_view[["Ticker", "Total Liabilities", "Net Crypto NAV"]].dropna()
+
+        # Determine ticker list and quick selection sets
+        all_tickers_ln = sorted(liab_nav_base["Ticker"].dropna().unique().tolist()) if not liab_nav_base.empty else []
+        top10_tickers_ln = (
+            liab_nav_base.sort_values("Net Crypto NAV", ascending=False)["Ticker"].head(10).tolist()
+            if not liab_nav_base.empty
+            else []
+        )
+        sel_key_ln = "sel_liabnav_tickers"
+        if sel_key_ln not in st.session_state:
+            st.session_state[sel_key_ln] = all_tickers_ln.copy()
+        # Sync with global selection if apply_to_all_charts is enabled
+        if st.session_state.get("apply_to_all_charts", False):
+            if st.session_state.get("global_ticker_selection"):
+                st.session_state[sel_key_ln] = st.session_state["global_ticker_selection"]
+            else:
+                st.session_state["global_ticker_selection"] = st.session_state[sel_key_ln]
+
+        # Layout: chart area and control area
+        chart_ln_col, ctrl_ln_col = st.columns([4, 1], gap="medium")
+        with ctrl_ln_col:
+            selected_ln = st.multiselect(
+                "Ticker",
+                options=all_tickers_ln,
+                default=st.session_state[sel_key_ln],
+                key=sel_key_ln,
+            )
+            st.session_state[sel_key_ln] = selected_ln
+            chip_ln_all, chip_ln_none, chip_ln_top = st.columns(3)
+            if chip_ln_all.button("All", key=f"{sel_key_ln}_all"):
+                st.session_state[sel_key_ln] = all_tickers_ln.copy()
+                selected_ln = all_tickers_ln.copy()
+                if st.session_state.get("apply_to_all_charts", False):
+                    st.session_state["global_ticker_selection"] = selected_ln
+            if chip_ln_none.button("None", key=f"{sel_key_ln}_none"):
+                st.session_state[sel_key_ln] = []
+                selected_ln = []
+                if st.session_state.get("apply_to_all_charts", False):
+                    st.session_state["global_ticker_selection"] = []
+            if chip_ln_top.button("Top 10", key=f"{sel_key_ln}_top10"):
+                st.session_state[sel_key_ln] = top10_tickers_ln.copy()
+                selected_ln = top10_tickers_ln.copy()
+                if st.session_state.get("apply_to_all_charts", False):
+                    st.session_state["global_ticker_selection"] = selected_ln
+            if st.session_state.get("apply_to_all_charts", False):
+                st.session_state["global_ticker_selection"] = st.session_state[sel_key_ln]
+
+        # Filter dataset based on selected tickers
+        selected_tickers_ln = st.session_state.get(sel_key_ln, all_tickers_ln)
+        if selected_tickers_ln:
+            liab_nav_df = liab_nav_base[liab_nav_base["Ticker"].isin(selected_tickers_ln)].copy()
+        else:
+            liab_nav_df = liab_nav_base.copy()
+
         if not liab_nav_df.empty:
             # Sort by Net Crypto NAV descending for clearer ordering
             liab_nav_df_sorted = liab_nav_df.sort_values("Net Crypto NAV", ascending=False)
@@ -722,55 +959,60 @@ with tab_charts:
             )
             if HAS_PLOTLY:
                 liab_nav_long = liab_nav_long.copy()
-                liab_nav_long["Amount_B"] = liab_nav_long["Amount"] / 1e9
+                # Human‑readable text for bar labels
+                liab_nav_long["value_str"] = liab_nav_long["Amount"].apply(_format_number_no_currency)
                 max_val_ln = (
                     liab_nav_long["Amount"].max() if not liab_nav_long["Amount"].empty else 0
                 )
                 if max_val_ln and max_val_ln > 0:
                     tickvals_ln = np.linspace(0, max_val_ln, 5)
-                    ticktext_ln = [f"{v/1e9:.2f}B" for v in tickvals_ln]
+                    ticktext_ln = [_format_number_no_currency(v) for v in tickvals_ln]
                 else:
                     tickvals_ln = [0]
-                    ticktext_ln = ["0B"]
+                    ticktext_ln = ["0"]
                 fig_ln = px.bar(
                     liab_nav_long,
                     x="Ticker",
                     y="Amount",
                     color="Metric",
                     barmode="group",
-                    text="Amount_B",
+                    text="value_str",
                     title=None,
                 )
                 fig_ln.update_yaxes(
-                    title="Amount (B USD)",
+                    title="Amount (USD)",
                     type="linear",
                     tickmode="array",
                     tickvals=tickvals_ln,
                     ticktext=ticktext_ln,
                 )
                 fig_ln.update_traces(
-                    texttemplate="%{text:.2f}B",
-                    hovertemplate="<b>%{x}</b><br>%{fullData.name}: %{text:.2f}B<extra></extra>",
+                    texttemplate="%{text}",
+                    hovertemplate="<b>%{x}</b><br>%{fullData.name}: %{text}<extra></extra>",
                 )
                 # Place legend on the right for long lists
                 fig_ln.update_layout(legend=dict(orientation="v", y=1, x=1.02))
-                st.plotly_chart(fig_ln, use_container_width=True)
+                chart_ln_col.plotly_chart(fig_ln, use_container_width=True)
             else:
-                # For Altair fallback, show values directly
+                # Altair fallback: direct bar chart with default formatting
                 ln_chart = (
                     alt.Chart(liab_nav_long)
                     .mark_bar()
                     .encode(
                         x="Ticker:N",
-                        y=alt.Y("Amount:Q", title="Amount (USD)", scale=alt.Scale(type="linear")),
+                        y=alt.Y(
+                            "Amount:Q",
+                            title="Amount (USD)",
+                            scale=alt.Scale(type="linear"),
+                        ),
                         color="Metric:N",
                         tooltip=["Ticker", "Metric", "Amount"],
                     )
                     .properties(title=None)
                 )
-                st.altair_chart(ln_chart, use_container_width=True)
+                chart_ln_col.altair_chart(ln_chart, use_container_width=True)
         else:
-            st.info("No data for liabilities vs Net Crypto NAV chart.")
+            chart_ln_col.info("No data for liabilities vs Net Crypto NAV chart.")
 
 with tab_table:
     st.subheader("Company Screener Table")
