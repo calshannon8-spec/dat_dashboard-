@@ -636,66 +636,69 @@ with tab_charts:
             if not data_top.empty
             else []
         )
-        # Session state key for this selector
         sel_key_top = "sel_top_tickers"
-        # Ensure the selection key exists and default to all tickers on first run
+        # Note: We deliberately avoid modifying a separate widget key in session state; instead we use
+        # `sel_key_top` both as the widget key and to persist selection in st.session_state. This
+        # prevents StreamlitAPIException errors when toggling buttons before widgets are created.
+
+        # Initialize the session state for this selector if it doesn't exist yet, defaulting to all tickers
         if sel_key_top not in st.session_state:
             st.session_state[sel_key_top] = all_tickers_top.copy()
 
-        # Function to update the global ticker selection when the user opts to
-        def _update_global_top():
-            """Propagate the current local selection to the global state when required."""
+        # If "Apply to all charts" is active, ensure our local selection reflects the global selection
+        if st.session_state.get("apply_to_all_charts", False):
+            if st.session_state.get("global_ticker_selection"):
+                st.session_state[sel_key_top] = st.session_state["global_ticker_selection"].copy()
+            else:
+                st.session_state["global_ticker_selection"] = st.session_state[sel_key_top].copy()
+
+        # Define a helper to propagate the current selection to the global state
+        def _update_global_top_selection():
             if st.session_state.get("apply_to_all_charts", False):
                 st.session_state["global_ticker_selection"] = st.session_state.get(sel_key_top, []).copy()
 
-        # When 'apply_to_all_charts' is enabled, sync the local selection with the global selection
-        if st.session_state.get("apply_to_all_charts", False):
-            if st.session_state.get("global_ticker_selection"):
-                # Use the previously stored global selection
-                st.session_state[sel_key_top] = st.session_state["global_ticker_selection"].copy()
-            else:
-                # Initialize global selection from this selector
-                st.session_state["global_ticker_selection"] = st.session_state[sel_key_top].copy()
-
+        # Layout: separate chart and control columns; within the control column place the multiselect
+        # and two buttons horizontally for a compact inline UI.
         col_chart_top, col_ctrl_top = st.columns([4, 1], gap="medium")
         with col_ctrl_top:
-            # Multiselect for tickers; use the session key directly
-            st.multiselect(
-                "Ticker",
-                options=all_tickers_top,
-                default=st.session_state[sel_key_top],
-                key=sel_key_top,
-                on_change=_update_global_top,
-            )
-
-            # Render selection buttons horizontally using columns; remove the "None" option
-            btn_cols = st.columns(2)
-
+            # Define callbacks for the All and Top 10 buttons
             def _select_all_top():
-                """Select all tickers in this group."""
                 st.session_state[sel_key_top] = all_tickers_top.copy()
-                _update_global_top()
+                _update_global_top_selection()
 
             def _select_top10():
-                """Select the top 10 tickers by Treasury."""
                 st.session_state[sel_key_top] = top10_tickers_top.copy()
-                _update_global_top()
+                _update_global_top_selection()
 
-            # All button
-            btn_cols[0].button(
+            # Arrange the 'All' and 'Top 10' buttons and the multiselect inline using columns.
+            # The multiselect is given more horizontal space for readability.
+            btn_all_col, btn_top_col, ms_col = st.columns([1, 1, 4])
+
+            # Place the 'All' button
+            btn_all_col.button(
                 "All",
                 key=f"{sel_key_top}_all",
                 on_click=_select_all_top,
             )
-            # Top 10 button
-            btn_cols[1].button(
+
+            # Place the 'Top 10' button
+            btn_top_col.button(
                 "Top 10",
                 key=f"{sel_key_top}_top10",
                 on_click=_select_top10,
             )
 
-        # Retrieve the currently selected tickers (empty list means show all)
-        selected_tickers_top = st.session_state.get(sel_key_top, all_tickers_top).copy()
+            # Place the multiselect in its own column
+            ms_col.multiselect(
+                "Ticker",
+                options=all_tickers_top,
+                default=st.session_state[sel_key_top],
+                key=sel_key_top,
+                on_change=_update_global_top_selection,
+            )
+
+        # Determine the set of tickers to filter by. If the multiselect is empty, fall back to all tickers
+        selected_tickers_top = st.session_state.get(sel_key_top, []).copy() or all_tickers_top
         if selected_tickers_top:
             filtered_top = data_top[data_top["Ticker"].isin(selected_tickers_top)]
         else:
