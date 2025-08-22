@@ -144,28 +144,6 @@ def fx_map_usd() -> dict:
         "GBP": fetch_fx("GBPUSD=X") or 1.27,
     }
 
-def fmt_abbrev(v):
-    """
-    Format large numbers into human-friendly strings with unit suffix.
-    Examples:
-      1,234,567 -> "$1.23M"
-      2,000,000,000 -> "$2.00B"
-    Negative numbers retain the minus sign. Values under 1M are shown without decimals.
-    """
-    try:
-        n = float(v)
-    except Exception:
-        return v
-    sign = "-" if n < 0 else ""
-    n = abs(n)
-    if n >= 1_000_000_000_000:
-        return f"{sign}${n/1_000_000_000_000:,.2f}T"
-    if n >= 1_000_000_000:
-        return f"{sign}${n/1_000_000_000:,.2f}B"
-    if n >= 1_000_000:
-        return f"{sign}${n/1_000_000:,.2f}M"
-    return f"{sign}${n:,.0f}"
-
 EXCHANGE_TO_CCY = {
     "NASDAQ": "USD", "NYSE": "USD",
     "TSXV": "CAD",
@@ -202,6 +180,31 @@ NAME_TO_MCAP_CCY = {
     "Satsuma Technology": "GBP",
     "Bitcoin Group SE": "EUR",
 }
+
+# Abbreviated number format helper
+def fmt_abbrev(v):
+    """
+    Format large numbers in abbreviated form with currency symbol.
+    Examples:
+        1_500_000 -> "$1.50M"
+        -2_000_000_000 -> "-$2.00B"
+        500 -> "$500"
+    """
+    try:
+        n = float(v)
+    except Exception:
+        return v
+    sign = "-" if n < 0 else ""
+    n = abs(n)
+    if n >= 1_000_000_000_000:
+        return f"{sign}${n/1_000_000_000_000:,.2f}T"
+    if n >= 1_000_000_000:
+        return f"{sign}${n/1_000_000_000:,.2f}B"
+    if n >= 1_000_000:
+        return f"{sign}${n/1_000_000:,.2f}M"
+    if n >= 1_000:
+        return f"{sign}${n/1_000:,.0f}K"
+    return f"{sign}${n:,.0f}"
 
 # ----------------- CSV parsing function -----------------
 
@@ -315,7 +318,8 @@ except Exception as e:
     st.error("Couldn't load prices.")
     st.exception(e)
 
-# Wallet balances and API settings removed as requested
+st.divider()
+# Wallet balances section removed – holdings are hardcoded and API lookup disabled.
 
 # -------------------- Company Screener --------------------------
 
@@ -446,100 +450,251 @@ else:
 
 _mc_min = float(df_view["Mkt Cap (USD)"].min() if not df_view.empty else 0.0)
 _mc_max = float(df_view["Mkt Cap (USD)"].max() if not df_view.empty else 0.0)
-_lo, _hi = st.sidebar.slider("Market Cap (USD, millions)",
-                             min_value=0.0,
-                             max_value=max(1.0, _mc_max/1e6),
-                             value=(0.0, max(1.0, _mc_max/1e6)))
-df_view = df_view[(df_view["Mkt Cap (USD)"] >= _lo*1e6) & (df_view["Mkt Cap (USD)"] <= _hi*1e6)]
+# Adapt market cap slider units based on the range (billions, millions, thousands)
+scale_unit = 1.0
+scale_label = ""
+if _mc_max >= 1e9:
+    scale_unit = 1e9
+    scale_label = "B"
+elif _mc_max >= 1e6:
+    scale_unit = 1e6
+    scale_label = "M"
+elif _mc_max >= 1e3:
+    scale_unit = 1e3
+    scale_label = "K"
+_mc_min_scaled = float(_mc_min) / scale_unit if scale_unit else 0.0
+_mc_max_scaled = float(_mc_max) / scale_unit if scale_unit else 0.0
+_lo, _hi = st.sidebar.slider(
+    f"Market Cap (USD, {scale_label})",
+    min_value=0.0,
+    max_value=max(1.0, _mc_max_scaled),
+    value=(0.0, max(1.0, _mc_max_scaled)),
+)
+df_view = df_view[
+    (df_view["Mkt Cap (USD)"] >= _lo * scale_unit)
+    & (df_view["Mkt Cap (USD)"] <= _hi * scale_unit)
+]
 
-tab_overview, tab_charts, tab_table = st.tabs(["Overview", "Charts", "Table"])
+st.subheader("Overview")
+# KPIs: use abbreviated number format and compute average MNAV
+c1, c2, c3 = st.columns(3)
+c1.metric("Total Treasury", fmt_abbrev(np.nansum(df_view['Treasury USD'])))
+c2.metric("Total Liabilities", fmt_abbrev(np.nansum(df_view['Total Liabilities'])))
+avg_mnav = float(np.nanmean(df_view['MNAV (x)'])) if not df_view['MNAV (x)'].dropna().empty else np.nan
+c3.metric("Average MNAV", f"{avg_mnav:.2f}x" if pd.notnull(avg_mnav) else "N/A")
 
-with tab_overview:
-    st.subheader("Overview")
-    # Compute aggregated metrics
-    total_treasury = np.nansum(df_view["Treasury USD"])
-    total_liabilities = np.nansum(df_view["Total Liabilities"])
-    # Compute average MNAV across companies, ignoring NaN and infinite values
-    avg_mnav_series = df_view["MNAV (x)"].replace([np.inf, -np.inf], np.nan).dropna()
-    avg_mnav_value = float(avg_mnav_series.mean()) if not avg_mnav_series.empty else np.nan
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total Treasury", fmt_abbrev(total_treasury))
-    c2.metric("Total Liabilities", fmt_abbrev(total_liabilities))
-    c3.metric("Average MNAV", f"{avg_mnav_value:.2f}x" if pd.notnull(avg_mnav_value) else "–")
-    st.caption(f"Filtered rows: {len(df_view)} / {len(df)}")
-
-with tab_charts:
-    st.subheader("Top Treasuries")
-    _top = df_view[["Ticker","name","Treasury USD"]].dropna().sort_values("Treasury USD", ascending=False).head(10)
-    if not _top.empty:
-        if HAS_PLOTLY:
-            fig = px.bar(_top, x="Ticker", y="Treasury USD", hover_data=["name","Treasury USD"], title="Top 10 by Treasury (USD)")
-            fig.update_yaxes(title="Treasury (USD)", tickformat="~s")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            chart = (alt.Chart(_top).mark_bar()
-                     .encode(x="Ticker:N", y=alt.Y("Treasury USD:Q", title="Treasury (USD)"),
-                             tooltip=["Ticker","name","Treasury USD"])
-                     .properties(title="Top 10 by Treasury (USD)"))
-            st.altair_chart(chart, use_container_width=True)
+st.subheader("Top Treasuries")
+_top = df_view[["Ticker","name","Treasury USD"]].dropna().sort_values("Treasury USD", ascending=False).head(10)
+if not _top.empty:
+    if HAS_PLOTLY:
+        fig = px.bar(_top, x="Ticker", y="Treasury USD", hover_data=["name","Treasury USD"], title="Top 10 by Treasury (USD)")
+        fig.update_yaxes(title="Treasury (USD)", tickformat="~s")
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("No rows available for ranking.")
-    st.subheader("Treasury % of Market Cap vs Market Cap")
-    _sc = df_view[["Ticker","name","Treasury USD","Mkt Cap (USD)","% of Mkt Cap"]].dropna()
-    if not _sc.empty:
-        # convert % to fraction for plotting as percentage axis
-        _sc = _sc.assign(pct=_sc["% of Mkt Cap"] / 100.0)
-        if HAS_PLOTLY:
-            fig2 = px.scatter(_sc, x="Mkt Cap (USD)", y="pct", size="Treasury USD",
-                              hover_data=["Ticker","name"], title="Treasury % of Market Cap vs Market Cap")
-            fig2.update_xaxes(title="Market Cap (USD)", tickformat="~s")
-            fig2.update_yaxes(title="% of Market Cap", tickformat=".2%")
-            st.plotly_chart(fig2, use_container_width=True)
-        else:
-            chart2 = (alt.Chart(_sc).mark_circle()
-                      .encode(x=alt.X("Mkt Cap (USD):Q", title="Market Cap (USD)"),
-                              y=alt.Y("pct:Q", title="% of Market Cap"),
-                              size="Treasury USD:Q",
-                              tooltip=["Ticker","name","Treasury USD","Mkt Cap (USD)","% of Mkt Cap"]))
-            st.altair_chart(chart2, use_container_width=True)
-    else:
-        st.info("Not enough data for scatter.")
+        chart = (alt.Chart(_top).mark_bar()
+                 .encode(x="Ticker:N", y=alt.Y("Treasury USD:Q", title="Treasury (USD)"),
+                         tooltip=["Ticker","name","Treasury USD"])
+                 .properties(title="Top 10 by Treasury (USD)"))
+        st.altair_chart(chart, use_container_width=True)
+else:
+    st.info("No rows available for ranking.")
 
-    # New bar chart: Liabilities vs Net Crypto NAV
-    st.subheader("Liabilities vs Net Crypto NAV")
-    liab_nav_df = df_view[["Ticker", "Total Liabilities", "Net Crypto NAV"]].dropna()
-    if not liab_nav_df.empty:
-        liab_nav_long = liab_nav_df.melt(id_vars=["Ticker"], value_vars=["Total Liabilities", "Net Crypto NAV"], var_name="Metric", value_name="Amount")
-        if HAS_PLOTLY:
-            fig_ln = px.bar(liab_nav_long, x="Ticker", y="Amount", color="Metric", barmode="group",
-                             title="Liabilities vs Net Crypto NAV by Company")
-            fig_ln.update_yaxes(tickformat="~s")
-            st.plotly_chart(fig_ln, use_container_width=True)
-        else:
-            ln_chart = (alt.Chart(liab_nav_long).mark_bar()
-                        .encode(x="Ticker:N", y=alt.Y("Amount:Q", title="Amount (USD)"), color="Metric:N",
-                                tooltip=["Ticker", "Metric", "Amount"])
-                        .properties(title="Liabilities vs Net Crypto NAV by Company"))
-            st.altair_chart(ln_chart, use_container_width=True)
+# ----------- New Chart: Liabilities vs Net Crypto NAV -----------
+st.subheader("Liabilities vs Net Crypto NAV")
+# Prepare data for bar chart: include difference for sorting
+liab_nav_df = df_view[
+    ["Ticker", "name", "Total Liabilities", "Net Crypto NAV", "Mkt Cap (USD)", "% of Mkt Cap"]
+].dropna()
+if not liab_nav_df.empty:
+    # Compute difference (NAV - Liabilities) for optional ranking
+    liab_nav_df = liab_nav_df.assign(Difference=liab_nav_df["Net Crypto NAV"] - liab_nav_df["Total Liabilities"])
+    # User controls: sort metric, view type, and y-axis scaling
+    sort_choice = st.selectbox(
+        "Sort top 12 by",
+        options=["Net Crypto NAV", "Total Liabilities", "Difference (NAV - Liabilities)"],
+        index=0,
+        help="Choose the metric used to rank and display the top companies.",
+    )
+    view_choice = st.radio(
+        "View type",
+        ["Grouped (NAV vs Liabilities)", "Difference (NAV - Liabilities)"],
+        index=0,
+        help="Select between a grouped comparison and a difference chart.",
+    )
+    log_scale = st.checkbox(
+        "Log scale (y-axis)",
+        value=False,
+        help="Enable logarithmic scaling to compare companies across large ranges.",
+    )
+    # Select the sorting metric
+    if sort_choice == "Net Crypto NAV":
+        sort_col = "Net Crypto NAV"
+    elif sort_choice == "Total Liabilities":
+        sort_col = "Total Liabilities"
     else:
-        st.info("No data for liabilities vs Net Crypto NAV chart.")
+        sort_col = "Difference"
+    df_sorted = liab_nav_df.sort_values(by=sort_col, ascending=False).head(12)
+    # Build grouped or difference bar chart depending on view_type
+    if view_choice.startswith("Grouped"):
+        # Reshape for grouped bar chart
+        long_df = df_sorted.melt(
+            id_vars=["Ticker"],
+            value_vars=["Total Liabilities", "Net Crypto NAV"],
+            var_name="Metric",
+            value_name="Amount",
+        )
+        if HAS_PLOTLY:
+            # Colour palette: liabilities = neutral/dark, NAV = accent
+            color_map = {
+                "Total Liabilities": "#636EFA",
+                "Net Crypto NAV": "#EF553B",
+            }
+            fig_bar = px.bar(
+                long_df,
+                x="Ticker",
+                y="Amount",
+                color="Metric",
+                barmode="group",
+                text="Amount",
+                color_discrete_map=color_map,
+                category_orders={"Ticker": df_sorted["Ticker"].tolist()},
+            )
+            # Format labels: abbreviated values on bars
+            fig_bar.update_traces(
+                texttemplate="%{text:.2s}",
+                textposition="outside",
+            )
+            # Axis formatting
+            if log_scale:
+                fig_bar.update_yaxes(type="log", tickformat="~s", title="Amount (USD, log)")
+            else:
+                fig_bar.update_yaxes(type="linear", tickformat="~s", title="Amount (USD)")
+                # Ensure baseline zero for linear scale
+                max_val = long_df["Amount"].max()
+                fig_bar.update_yaxes(range=[0, max_val * 1.1])
+            fig_bar.update_xaxes(title="Ticker", tickangle=-45)
+            fig_bar.update_layout(legend_title=None, margin=dict(b=150))
+            # Annotate the biggest absolute difference within selected rows
+            max_diff_idx = df_sorted["Difference"].abs().idxmax()
+            out_ticker = df_sorted.loc[max_diff_idx, "Ticker"]
+            out_nav = df_sorted.loc[max_diff_idx, "Net Crypto NAV"]
+            fig_bar.add_annotation(
+                x=out_ticker,
+                y=out_nav,
+                text=f"{out_ticker} NAV ≫ Liab",
+                showarrow=True,
+                arrowhead=1,
+                yshift=10,
+            )
+            st.plotly_chart(fig_bar, use_container_width=True)
+        else:
+            # Altair fallback
+            import altair as alt
+            alt_domain = df_sorted["Ticker"].tolist()
+            bar_chart = (
+                alt.Chart(long_df)
+                .mark_bar()
+                .encode(
+                    x=alt.X("Ticker:N", sort=alt_domain, title="Ticker"),
+                    y=alt.Y(
+                        "Amount:Q",
+                        scale=alt.Scale(type="log") if log_scale else alt.Scale(type="linear", domain=[0, long_df["Amount"].max() * 1.1]),
+                        title="Amount (USD)",
+                    ),
+                    color=alt.Color(
+                        "Metric:N",
+                        scale=alt.Scale(domain=["Total Liabilities", "Net Crypto NAV"], range=["#636EFA", "#EF553B"]),
+                    ),
+                    tooltip=["Ticker", "Metric", alt.Tooltip("Amount:Q", format="~s")],
+                )
+                .properties(title=None)
+            )
+            st.altair_chart(bar_chart, use_container_width=True)
+    else:
+        # Difference view: show NAV minus liabilities; highlight positive/negative
+        diff_df = df_sorted[["Ticker", "Difference"]].copy()
+        if HAS_PLOTLY:
+            diff_df["Sign"] = diff_df["Difference"].apply(lambda x: "Positive" if x >= 0 else "Negative")
+            color_map = {"Positive": "#00CC96", "Negative": "#AB63FA"}
+            fig_diff = px.bar(
+                diff_df,
+                x="Ticker",
+                y="Difference",
+                color="Sign",
+                text="Difference",
+                color_discrete_map=color_map,
+                category_orders={"Ticker": diff_df["Ticker"].tolist()},
+            )
+            fig_diff.update_traces(
+                texttemplate="%{text:.2s}",
+                textposition="outside",
+            )
+            # Signed differences are always linear scale
+            fig_diff.update_yaxes(type="linear", tickformat="~s", title="NAV - Liabilities (USD)")
+            max_val = diff_df["Difference"].abs().max()
+            fig_diff.update_yaxes(range=[-max_val * 1.1, max_val * 1.1])
+            fig_diff.update_xaxes(title="Ticker", tickangle=-45)
+            fig_diff.update_layout(legend_title=None, margin=dict(b=150))
+            st.plotly_chart(fig_diff, use_container_width=True)
+        else:
+            import altair as alt
+            diff_df["Sign"] = diff_df["Difference"].apply(lambda x: "Positive" if x >= 0 else "Negative")
+            bar_chart = (
+                alt.Chart(diff_df)
+                .mark_bar()
+                .encode(
+                    x=alt.X("Ticker:N", sort=diff_df["Ticker"].tolist(), title="Ticker"),
+                    y=alt.Y("Difference:Q", title="NAV - Liabilities (USD)"),
+                    color=alt.Color(
+                        "Sign:N",
+                        scale=alt.Scale(domain=["Positive", "Negative"], range=["#00CC96", "#AB63FA"]),
+                    ),
+                    tooltip=["Ticker", alt.Tooltip("Difference:Q", format="~s")],
+                )
+                .properties(title=None)
+            )
+            st.altair_chart(bar_chart, use_container_width=True)
+else:
+    st.info("No data available for liabilities vs NAV chart.")
 
-with tab_table:
-    st.subheader("Company Screener Table")
-    # Format the display DataFrame with abbreviated numbers
-    df_display = df_view.copy()
-    for col in ["Mkt Cap (USD)", "Treasury USD", "Total Liabilities", "Net Crypto NAV"]:
-        if col in df_display.columns:
-            df_display[col] = df_display[col].apply(fmt_abbrev)
-    if "NAV per share" in df_display.columns:
-        df_display["NAV per share"] = df_display["NAV per share"].apply(lambda x: f"${x:,.2f}" if pd.notnull(x) else "–")
-    if "Share price USD" in df_display.columns:
-        df_display["Share price USD"] = df_display["Share price USD"].apply(lambda x: f"${x:,.2f}" if pd.notnull(x) else "–")
-    if "% of Mkt Cap" in df_display.columns:
-        df_display["% of Mkt Cap"] = df_display["% of Mkt Cap"].apply(lambda x: f"{x:.2f}%")
-    if "MNAV (x)" in df_display.columns:
-        df_display["MNAV (x)"] = df_display["MNAV (x)"].apply(lambda x: f"{x:.2f}x" if pd.notnull(x) else "–")
-    st.dataframe(df_display, use_container_width=True)
+st.subheader("Treasury % of Market Cap vs Market Cap")
+_sc = df_view[["Ticker","name","Treasury USD","Mkt Cap (USD)","% of Mkt Cap"]].dropna()
+if not _sc.empty:
+    # convert % to fraction for plotting as percentage axis
+    _sc = _sc.assign(pct=_sc["% of Mkt Cap"] / 100.0)
+    if HAS_PLOTLY:
+        fig2 = px.scatter(_sc, x="Mkt Cap (USD)", y="pct", size="Treasury USD",
+                          hover_data=["Ticker","name"], title="Treasury % of Market Cap vs Market Cap",
+                          log_x=True)
+        fig2.update_xaxes(title="Market Cap (USD, log)", tickformat="~s")
+        fig2.update_yaxes(title="% of Market Cap", tickformat=".2%")
+        st.plotly_chart(fig2, use_container_width=True)
+    else:
+        chart2 = (alt.Chart(_sc).mark_circle()
+                  .encode(x=alt.X("Mkt Cap (USD):Q", scale=alt.Scale(type="log"), title="Market Cap (USD, log)"),
+                          y=alt.Y("pct:Q", title="% of Market Cap"),
+                          size="Treasury USD:Q",
+                          tooltip=["Ticker","name","Treasury USD","Mkt Cap (USD)","% of Mkt Cap"]))
+        st.altair_chart(chart2, use_container_width=True)
+else:
+    st.info("Not enough data for scatter.")
+
+st.caption(f"Filtered rows: {len(df_view)} / {len(df)}")
 
 # -------------------- Table (formatted) -------------------------
-# Data table is rendered within the "Table" tab; see tab_table definition above.
+
+df_display = df_view.copy()
+for col in ["Mkt Cap (USD)", "Treasury USD", "Total Liabilities", "Net Crypto NAV"]:
+    if col in df_display.columns:
+        df_display[col] = df_display[col].apply(fmt_abbrev)
+
+if "NAV per share" in df_display.columns:
+    df_display["NAV per share"] = df_display["NAV per share"].apply(lambda x: f"${x:,.2f}" if pd.notnull(x) else "–")
+if "Share price USD" in df_display.columns:
+    df_display["Share price USD"] = df_display["Share price USD"].apply(lambda x: f"${x:,.2f}" if pd.notnull(x) else "–")
+if "% of Mkt Cap" in df_display.columns:
+    df_display["% of Mkt Cap"] = df_display["% of Mkt Cap"].apply(lambda x: f"{x:.2f}%")
+if "MNAV (x)" in df_display.columns:
+    df_display["MNAV (x)"] = df_display["MNAV (x)"].apply(lambda x: f"{x:.2f}x" if pd.notnull(x) else "–")
+
+st.dataframe(df_display, use_container_width=True)
