@@ -23,6 +23,29 @@ except Exception:
 APP_DIR = Path(__file__).parent.resolve()
 st.set_page_config(page_title="DAT Dashboard", page_icon="🟠")
 
+# ------------------------------------------------------------------
+# Intro / Glossary
+#
+# Provide a brief explainer for the dashboard and define terms (NAV/MNAV).
+st.markdown(
+    """
+    ### Data & Analytics Tool (DAT) Dashboard
+
+    Welcome! This dashboard provides insights into publicly listed companies that hold crypto assets.
+    Use the **Overview**, **Charts**, and **Table** tabs to explore treasury balances, liabilities and
+    market valuations.\n
+    **Glossary:**
+    - **Net Crypto NAV**: Treasury USD minus total liabilities.
+    - **NAV per share**: Net Crypto NAV divided by shares outstanding.
+    - **MNAV (x)**: Share price divided by NAV per share (multiple).
+    """,
+    unsafe_allow_html=False,
+)
+
+# Track CSV source and load time for display
+LOADED_CSV_NAME: str | None = None  # name of the CSV file loaded for screener
+LOADED_TIME: datetime | None = None  # timestamp when the CSV was processed
+
 # --------------------------- Helpers ----------------------------
 
 def add_mnav(df: pd.DataFrame) -> pd.DataFrame:
@@ -266,6 +289,9 @@ def load_companies_and_holdings(src):
 uploaded = st.sidebar.file_uploader("Upload companies_holdings.csv", type=["csv"])
 if uploaded is not None:
     companies, HOLDINGS = load_companies_and_holdings(uploaded)
+    # Record CSV name and load time when user uploads a file
+    LOADED_CSV_NAME = getattr(uploaded, "name", "uploaded.csv")
+    LOADED_TIME = datetime.now(timezone.utc)
 else:
     env_csv = os.environ.get("DAT_CSV_PATH")
     candidates = [
@@ -279,6 +305,9 @@ else:
         if CSV_PATH.name != "companies_holdings.csv":
             st.info(f"Using demo CSV: {CSV_PATH.name} (upload to override)")
         companies, HOLDINGS = load_companies_and_holdings(CSV_PATH)
+        # Record CSV name and load time for display
+        LOADED_CSV_NAME = CSV_PATH.name
+        LOADED_TIME = datetime.now(timezone.utc)
     else:
         st.warning("No CSV found. Upload a file to continue.")
         st.stop()
@@ -309,19 +338,32 @@ try:
     c[0].metric("BTC", f"${prices['BTC']:,}")
     c[1].metric("ETH", f"${prices['ETH']:,}")
     c[2].metric("USDC", f"${prices['USDC']:,}")
-    st.caption("Last updated: " + datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S %Z"))
+    # Show a green dot to indicate fresh data
+    green_dot = "<span style='color:green'>&#9679;</span>"
+    st.caption(
+        f"{green_dot} Last updated: "
+        + datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S %Z"),
+        unsafe_allow_html=True,
+    )
 except Exception as e:
     prices = {"BTC": 0.0, "ETH": 0.0, "USDC": 0.0}
     st.error("Couldn't load prices.")
     st.exception(e)
 
 st.divider()
-st.header("Wallet Balances (ETH Mainnet)")
-with st.sidebar:
-    st.subheader("API / Wallet Settings")
+# Wallet balances section is collapsible to reduce clutter
+with st.sidebar.expander("API / Wallet Settings", expanded=False):
+    st.subheader("Wallet Settings")
     covalent_api_key = st.text_input("Covalent API Key", type="password")
-    eth_address = st.text_input("ETH Address (0x...)", placeholder="e.g., 0x742d35Cc6634C0532925a3b844Bc454e4438f44e")
-    fetch_btn = st.button("Fetch Balances")
+    eth_address = st.text_input(
+        "ETH Address (0x...)",
+        placeholder="e.g., 0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
+    )
+    # Only allow fetching balances when both API key and address are provided
+    fetch_btn = st.button(
+        "Fetch Balances",
+        disabled=not bool(covalent_api_key and eth_address),
+    )
 
 def fetch_eth_balances_covalent(api_key: str, address: str):
     if not api_key or not address:
@@ -374,6 +416,12 @@ if fetch_btn:
 
 st.divider()
 st.header("Company Screener (from CSV)")
+
+# Display CSV file name and load time if available
+if LOADED_CSV_NAME and LOADED_TIME:
+    st.caption(
+        f"Source CSV: {LOADED_CSV_NAME} (loaded {LOADED_TIME.strftime('%Y-%m-%d %H:%M:%S %Z')})"
+    )
 
 def with_live_fields(c: dict) -> dict:
     """Attach market cap USD, price USD, holdings, liabilities, and NAV/share."""
@@ -516,115 +564,213 @@ with tab_overview:
     avg_mnav_series = df_view["MNAV (x)"].replace([np.inf, -np.inf], np.nan).dropna()
     avg_mnav_value = float(avg_mnav_series.mean()) if not avg_mnav_series.empty else np.nan
     c1, c2, c3 = st.columns(3)
-    c1.metric("Total Treasury", fmt_abbrev(total_treasury))
-    c2.metric("Total Liabilities", fmt_abbrev(total_liabilities))
-    c3.metric("Average MNAV", f"{avg_mnav_value:.2f}x" if pd.notnull(avg_mnav_value) else "–")
+    c1.metric(
+        "Total Treasury",
+        fmt_abbrev(total_treasury),
+        help="Sum of BTC, ETH and stablecoin holdings across the filtered companies",
+    )
+    c2.metric(
+        "Total Liabilities",
+        fmt_abbrev(total_liabilities),
+        help="Sum of reported liabilities for the filtered companies",
+    )
+    c3.metric(
+        "Average MNAV",
+        f"{avg_mnav_value:.2f}x" if pd.notnull(avg_mnav_value) else "–",
+        help="Mean of MNAV (market cap / net asset value) across the filtered companies",
+    )
     st.caption(f"Filtered rows: {len(df_view)} / {len(df)}")
 
 with tab_charts:
-    st.subheader("Top Treasuries")
-    _top = df_view[["Ticker","name","Treasury USD"]].dropna().sort_values("Treasury USD", ascending=False).head(10)
-    if not _top.empty:
-        if HAS_PLOTLY:
-            fig = px.bar(_top, x="Ticker", y="Treasury USD", hover_data=["name","Treasury USD"], title="Top 10 by Treasury (USD)")
-            fig.update_yaxes(title="Treasury (USD)", tickformat="~s")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            chart = (alt.Chart(_top).mark_bar()
-                     .encode(x="Ticker:N", y=alt.Y("Treasury USD:Q", title="Treasury (USD)"),
-                             tooltip=["Ticker","name","Treasury USD"])
-                     .properties(title="Top 10 by Treasury (USD)"))
-            st.altair_chart(chart, use_container_width=True)
-    else:
-        st.info("No rows available for ranking.")
-    st.subheader("Treasury % of Market Cap vs Market Cap")
-    _sc = df_view[["Ticker","name","Treasury USD","Mkt Cap (USD)","% of Mkt Cap"]].dropna()
-    if not _sc.empty:
-        # convert % to fraction for plotting as percentage axis
-        _sc = _sc.assign(pct=_sc["% of Mkt Cap"] / 100.0)
-        if HAS_PLOTLY:
-            fig2 = px.scatter(_sc, x="Mkt Cap (USD)", y="pct", size="Treasury USD",
-                              hover_data=["Ticker","name"], title="Treasury % of Market Cap vs Market Cap")
-            fig2.update_xaxes(title="Market Cap (USD)", tickformat="~s")
-            fig2.update_yaxes(title="% of Market Cap", tickformat=".2%")
-            st.plotly_chart(fig2, use_container_width=True)
-        else:
-            chart2 = (alt.Chart(_sc).mark_circle()
-                      .encode(x=alt.X("Mkt Cap (USD):Q", title="Market Cap (USD)"),
-                              y=alt.Y("pct:Q", title="% of Market Cap"),
-                              size="Treasury USD:Q",
-                              tooltip=["Ticker","name","Treasury USD","Mkt Cap (USD)","% of Mkt Cap"]))
-            st.altair_chart(chart2, use_container_width=True)
-    else:
-        st.info("Not enough data for scatter.")
+    # Use sub-tabs to organize the charts similar to Blockworks' analytics sections
+    st.caption("Select a section below to explore different aspects of the data.")
+    sub_tab1, sub_tab2, sub_tab3 = st.tabs([
+        "Treasury Composition",
+        "Market Cap vs Treasury",
+        "Valuation & MNAV",
+    ])
 
-    # New bar chart: Liabilities vs Net Crypto NAV
-    st.subheader("Liabilities vs Net Crypto NAV")
-    liab_nav_df = df_view[["Ticker", "Total Liabilities", "Net Crypto NAV"]].dropna()
-    if not liab_nav_df.empty:
-        # Prepare a long-form DataFrame for bar plotting
-        liab_nav_long = liab_nav_df.melt(
-            id_vars=["Ticker"],
-            value_vars=["Total Liabilities", "Net Crypto NAV"],
-            var_name="Metric",
-            value_name="Amount",
+    # ------------------------------------------------------------------
+    # Sub‑tab 1: Top Treasury holdings
+    # ------------------------------------------------------------------
+    with sub_tab1:
+        st.markdown("#### Top 10 by Treasury (USD)")
+        st.caption("Companies with the largest crypto treasury holdings")
+        _top = (
+            df_view[["Ticker", "name", "Treasury USD"]]
+            .dropna()
+            .sort_values("Treasury USD", ascending=False)
+            .head(10)
         )
-        if HAS_PLOTLY:
-            # Compute values in billions for labels and tooltips
-            liab_nav_long = liab_nav_long.copy()
-            liab_nav_long["Amount_B"] = liab_nav_long["Amount"] / 1e9
-            # Create grouped bar chart using original amounts for scale but display billions in labels
-            fig_ln = px.bar(
-                liab_nav_long,
-                x="Ticker",
-                y="Amount",
-                color="Metric",
-                barmode="group",
-                text="Amount_B",
-                title="Liabilities vs Net Crypto NAV by Company",
-            )
-            # Determine y‑axis tick positions and labels so that billions are shown with "B" suffix
-            max_val = liab_nav_long["Amount"].max() if not liab_nav_long["Amount"].empty else 0
-            # Always compute at least two ticks to avoid division by zero; fallback to [0] if max_val == 0
-            if max_val and max_val > 0:
-                # Use five evenly spaced ticks from 0 to max_val
-                num_ticks = 5
-                tickvals = np.linspace(0, max_val, num_ticks)
-                ticktext = [f"{v/1e9:.2f}B" for v in tickvals]
-            else:
-                tickvals = [0]
-                ticktext = ["0B"]
-            # Update y‑axis: ensure linear scale and apply custom ticks/text
-            fig_ln.update_yaxes(
-                title="Amount (B USD)",
-                type="linear",
-                tickmode="array",
-                tickvals=tickvals,
-                ticktext=ticktext,
-            )
-            # Use consistent bar text and hover templates to display billions with suffix "B"
-            fig_ln.update_traces(
-                texttemplate="%{text:.2f}B",
-                hovertemplate="<b>%{x}</b><br>%{fullData.name}: %{text:.2f}B<extra></extra>",
-            )
-            # Preserve existing styles such as colors, gridlines, and legend
-            st.plotly_chart(fig_ln, use_container_width=True)
-        else:
-            # For Altair fallback, keep original values but rely on automatic formatting (no 'G' units)
-            ln_chart = (
-                alt.Chart(liab_nav_long)
-                .mark_bar()
-                .encode(
-                    x="Ticker:N",
-                    y=alt.Y("Amount:Q", title="Amount (USD)", scale=alt.Scale(type="linear")),
-                    color="Metric:N",
-                    tooltip=["Ticker", "Metric", "Amount"],
+        if not _top.empty:
+            if HAS_PLOTLY:
+                # Compute billions for labels
+                _top = _top.copy()
+                _top["Treasury_B"] = _top["Treasury USD"] / 1e9
+                # Determine tick values and labels for B/M formatting
+                max_val_top = _top["Treasury USD"].max() if not _top["Treasury USD"].empty else 0
+                if max_val_top and max_val_top > 0:
+                    tickvals_top = np.linspace(0, max_val_top, 5)
+                    ticktext_top = [f"{v/1e9:.2f}B" for v in tickvals_top]
+                else:
+                    tickvals_top = [0]
+                    ticktext_top = ["0B"]
+                fig_top = px.bar(
+                    _top,
+                    x="Ticker",
+                    y="Treasury USD",
+                    text="Treasury_B",
+                    hover_data=["name"],
+                    title=None,
                 )
-                .properties(title="Liabilities vs Net Crypto NAV by Company")
+                fig_top.update_yaxes(
+                    title="Treasury (B USD)",
+                    type="linear",
+                    tickmode="array",
+                    tickvals=tickvals_top,
+                    ticktext=ticktext_top,
+                )
+                fig_top.update_traces(
+                    texttemplate="%{text:.2f}B",
+                    hovertemplate="<b>%{x}</b><br>Treasury: %{text:.2f}B<extra></extra>",
+                )
+                # Place legend outside if one appears (though bar chart has no legend here)
+                st.plotly_chart(fig_top, use_container_width=True)
+            else:
+                chart_top = (
+                    alt.Chart(_top)
+                    .mark_bar()
+                    .encode(
+                        x="Ticker:N",
+                        y=alt.Y("Treasury USD:Q", title="Treasury (USD)", scale=alt.Scale(type="linear")),
+                        tooltip=["Ticker", "name", "Treasury USD"],
+                    )
+                    .properties(title=None)
+                )
+                st.altair_chart(chart_top, use_container_width=True)
+        else:
+            st.info("No rows available for ranking.")
+
+    # ------------------------------------------------------------------
+    # Sub‑tab 2: Market Cap vs Treasury scatter
+    # ------------------------------------------------------------------
+    with sub_tab2:
+        st.markdown("#### Treasury % of Market Cap vs Market Cap")
+        st.caption("Relationship between market cap and the share of crypto treasury")
+        _sc = df_view[["Ticker", "name", "Treasury USD", "Mkt Cap (USD)", "% of Mkt Cap"]].dropna()
+        if not _sc.empty:
+            _sc = _sc.assign(pct=_sc["% of Mkt Cap"] / 100.0)
+            if HAS_PLOTLY:
+                max_val_sc = _sc["Mkt Cap (USD)"].max() if not _sc["Mkt Cap (USD)"].empty else 0
+                if max_val_sc and max_val_sc > 0:
+                    tickvals_sc = np.linspace(0, max_val_sc, 5)
+                    ticktext_sc = [f"{v/1e9:.2f}B" for v in tickvals_sc]
+                else:
+                    tickvals_sc = [0]
+                    ticktext_sc = ["0B"]
+                fig_sc = px.scatter(
+                    _sc,
+                    x="Mkt Cap (USD)",
+                    y="pct",
+                    size="Treasury USD",
+                    hover_data=["Ticker", "name"],
+                    title=None,
+                    labels={"pct": "% of Market Cap"},
+                )
+                fig_sc.update_xaxes(
+                    title="Market Cap (B USD)",
+                    type="linear",
+                    tickmode="array",
+                    tickvals=tickvals_sc,
+                    ticktext=ticktext_sc,
+                )
+                fig_sc.update_yaxes(title="% of Market Cap", tickformat=".2%")
+                # Provide a vertical legend if necessary
+                fig_sc.update_layout(legend=dict(orientation="v", y=1, x=1.02))
+                st.plotly_chart(fig_sc, use_container_width=True)
+            else:
+                chart_sc = (
+                    alt.Chart(_sc)
+                    .mark_circle()
+                    .encode(
+                        x=alt.X("Mkt Cap (USD):Q", title="Market Cap (USD)", scale=alt.Scale(type="linear")),
+                        y=alt.Y("pct:Q", title="% of Market Cap"),
+                        size="Treasury USD:Q",
+                        tooltip=["Ticker", "name", "Treasury USD", "Mkt Cap (USD)", "% of Mkt Cap"],
+                    )
+                    .properties(title=None)
+                )
+                st.altair_chart(chart_sc, use_container_width=True)
+        else:
+            st.info("Not enough data for scatter.")
+
+    # ------------------------------------------------------------------
+    # Sub‑tab 3: Liabilities vs Net Crypto NAV
+    # ------------------------------------------------------------------
+    with sub_tab3:
+        st.markdown("#### Liabilities vs Net Crypto NAV")
+        st.caption("Compare total liabilities against net crypto NAV across companies")
+        liab_nav_df = df_view[["Ticker", "Total Liabilities", "Net Crypto NAV"]].dropna()
+        if not liab_nav_df.empty:
+            # Sort by Net Crypto NAV descending for clearer ordering
+            liab_nav_df_sorted = liab_nav_df.sort_values("Net Crypto NAV", ascending=False)
+            liab_nav_long = liab_nav_df_sorted.melt(
+                id_vars=["Ticker"],
+                value_vars=["Total Liabilities", "Net Crypto NAV"],
+                var_name="Metric",
+                value_name="Amount",
             )
-            st.altair_chart(ln_chart, use_container_width=True)
-    else:
-        st.info("No data for liabilities vs Net Crypto NAV chart.")
+            if HAS_PLOTLY:
+                liab_nav_long = liab_nav_long.copy()
+                liab_nav_long["Amount_B"] = liab_nav_long["Amount"] / 1e9
+                max_val_ln = (
+                    liab_nav_long["Amount"].max() if not liab_nav_long["Amount"].empty else 0
+                )
+                if max_val_ln and max_val_ln > 0:
+                    tickvals_ln = np.linspace(0, max_val_ln, 5)
+                    ticktext_ln = [f"{v/1e9:.2f}B" for v in tickvals_ln]
+                else:
+                    tickvals_ln = [0]
+                    ticktext_ln = ["0B"]
+                fig_ln = px.bar(
+                    liab_nav_long,
+                    x="Ticker",
+                    y="Amount",
+                    color="Metric",
+                    barmode="group",
+                    text="Amount_B",
+                    title=None,
+                )
+                fig_ln.update_yaxes(
+                    title="Amount (B USD)",
+                    type="linear",
+                    tickmode="array",
+                    tickvals=tickvals_ln,
+                    ticktext=ticktext_ln,
+                )
+                fig_ln.update_traces(
+                    texttemplate="%{text:.2f}B",
+                    hovertemplate="<b>%{x}</b><br>%{fullData.name}: %{text:.2f}B<extra></extra>",
+                )
+                # Place legend on the right for long lists
+                fig_ln.update_layout(legend=dict(orientation="v", y=1, x=1.02))
+                st.plotly_chart(fig_ln, use_container_width=True)
+            else:
+                # For Altair fallback, show values directly
+                ln_chart = (
+                    alt.Chart(liab_nav_long)
+                    .mark_bar()
+                    .encode(
+                        x="Ticker:N",
+                        y=alt.Y("Amount:Q", title="Amount (USD)", scale=alt.Scale(type="linear")),
+                        color="Metric:N",
+                        tooltip=["Ticker", "Metric", "Amount"],
+                    )
+                    .properties(title=None)
+                )
+                st.altair_chart(ln_chart, use_container_width=True)
+        else:
+            st.info("No data for liabilities vs Net Crypto NAV chart.")
 
 with tab_table:
     st.subheader("Company Screener Table")
