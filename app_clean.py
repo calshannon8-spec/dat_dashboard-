@@ -51,6 +51,30 @@ def add_mnav(df: pd.DataFrame) -> pd.DataFrame:
     df["MNAV (x)"]       = np.where(df["NAV per share"] > 0, df[price_col] / df["NAV per share"], np.nan)
     return df
 
+# ------------------------------------------------------------------------------
+# Number formatting helper
+#
+# Abbreviate large numbers with two decimals and suffixes (K, M, B, T). Negative
+# values preserve their sign. Returns a string with a dollar sign. For values
+# under 1,000, two decimal places are shown. This helper is defined early so it
+# can be used throughout the app, including in the Live Prices metrics.
+def fmt_abbrev(v: float | int | str) -> str:
+    try:
+        n = float(v)
+    except Exception:
+        return str(v)
+    sign = "-" if n < 0 else ""
+    n = abs(n)
+    if n >= 1_000_000_000_000:
+        return f"{sign}${n / 1_000_000_000_000:.2f}T"
+    if n >= 1_000_000_000:
+        return f"{sign}${n / 1_000_000_000:.2f}B"
+    if n >= 1_000_000:
+        return f"{sign}${n / 1_000_000:.2f}M"
+    if n >= 1_000:
+        return f"{sign}${n / 1_000:.2f}K"
+    return f"{sign}${n:.2f}"
+
 @st.cache_data(ttl=120, show_spinner=False)
 def fetch_mcap_yahoo(y_symbol: str) -> float | None:
     """Market cap (USD) via yfinance; returns float or None."""
@@ -283,13 +307,46 @@ def fetch_prices():
 
 try:
     prices = fetch_prices()
-    c = st.columns(3)
-    c[0].metric("BTC", f"${prices['BTC']:,}")
-    c[1].metric("ETH", f"${prices['ETH']:,}")
-    c[2].metric("USDC", f"${prices['USDC']:,}")
-    st.caption("Last updated: " + datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S %Z"))
+    # Build stress‑test sliders in the sidebar for all coins except USDC (pegged to 1)
+    with st.sidebar:
+        st.markdown("### Stress test: price shocks")
+        # Only shock BTC and ETH (or any future alt‑coins); exclude USDC
+        shock_syms = [sym for sym in prices.keys() if sym.upper() != 'USDC']
+        shock_pcts = {}
+        for sym in shock_syms:
+            shock_pcts[sym] = st.slider(
+                f"{sym} shock",
+                min_value=-50,
+                max_value=200,
+                value=0,
+                step=5,
+                format="%d%%",
+                help="Apply a percentage shock to the price used in Treasury/NAV/MNAV."
+            )
+        # Effective prices: apply shock to BTC/ETH; keep USDC unchanged
+        prices_eff = {}
+        for sym in prices.keys():
+            if sym in shock_pcts:
+                prices_eff[sym] = prices[sym] * (1 + shock_pcts[sym] / 100.0)
+            else:
+                prices_eff[sym] = prices[sym]
+    # Display shocked metrics for BTC and ETH using abbreviated format
+    cols = st.columns(len(shock_syms))
+    # Iterate in stable order: BTC, ETH
+    if 'BTC' in shock_syms:
+        cols[0].metric("BTC (shocked)", fmt_abbrev(prices_eff['BTC']), delta=f"{shock_pcts.get('BTC', 0)}%")
+    if 'ETH' in shock_syms and len(cols) > 1:
+        cols[1].metric("ETH (shocked)", fmt_abbrev(prices_eff['ETH']), delta=f"{shock_pcts.get('ETH', 0)}%")
+    st.caption(
+        "Last updated: "
+        + datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S %Z")
+        + " · Calculations below use shocked prices for BTC/ETH; USDC omitted."
+    )
 except Exception as e:
+    # On failure, fall back to zero prices and no shocks
     prices = {"BTC": 0.0, "ETH": 0.0, "USDC": 0.0}
+    shock_pcts = {"BTC": 0, "ETH": 0}
+    prices_eff = prices.copy()
     st.error("Couldn't load prices.")
     st.exception(e)
 
@@ -460,7 +517,13 @@ def compute_row(c: dict, prices: dict) -> dict:
 
 # Build enriched companies & numeric DataFrame once
 enriched = [with_live_fields(c) for c in companies]
-rows = [compute_row(c, prices) for c in enriched]
+# Use shocked prices (prices_eff) if available; otherwise fall back to live prices
+try:
+    effective_prices = prices_eff  # defined in the Live Prices section
+except NameError:
+    effective_prices = prices
+
+rows = [compute_row(c, effective_prices) for c in enriched]
 df = pd.DataFrame(rows)
 df = add_mnav(df)
 df = df.sort_values(by="% of Mkt Cap", ascending=False).reset_index(drop=True)
@@ -485,9 +548,9 @@ df_view = df_view[(df_view["Mkt Cap (USD)"] >= _lo*1e6) & (df_view["Mkt Cap (USD
 
 st.subheader("Overview")
 c1, c2, c3 = st.columns(3)
-c1.metric("Total Treasury", f"${np.nansum(df_view['Treasury USD']):,.0f}")
-c2.metric("Total Liabilities", f"${np.nansum(df_view['Total Liabilities']):,.0f}")
-c3.metric("Net NAV (sum)", f"${(np.nansum(df_view['Treasury USD']) - np.nansum(df_view['Total Liabilities'])):,.0f}")
+c1.metric("Total Treasury", fmt_abbrev(np.nansum(df_view['Treasury USD'])))
+c2.metric("Total Liabilities", fmt_abbrev(np.nansum(df_view['Total Liabilities'])))
+c3.metric("Net NAV (sum)", fmt_abbrev(np.nansum(df_view['Treasury USD']) - np.nansum(df_view['Total Liabilities'])))
 
 st.subheader("Top Treasuries")
 _top = df_view[["Ticker","name","Treasury USD"]].dropna().sort_values("Treasury USD", ascending=False).head(10)
@@ -531,15 +594,7 @@ st.caption(f"Filtered rows: {len(df_view)} / {len(df)}")
 
 # -------------------- Table (formatted) -------------------------
 
-def fmt_abbrev(v):
-    try: n = float(v)
-    except Exception: return v
-    sign = "-" if n < 0 else ""
-    n = abs(n)
-    if n >= 1_000_000_000_000: return f"{sign}${n/1_000_000_000_000:,.2f}T"
-    if n >= 1_000_000_000:     return f"{sign}${n/1_000_000_000:,.2f}B"
-    if n >= 1_000_000:         return f"{sign}${n/1_000_000:,.2f}M"
-    return f"{sign}${n:,.0f}"
+# (Moved fmt_abbrev definition near the helpers section above)
 
 df_display = df_view.copy()
 for col in ["Mkt Cap (USD)", "Treasury USD", "Total Liabilities", "Net Crypto NAV"]:
@@ -547,9 +602,9 @@ for col in ["Mkt Cap (USD)", "Treasury USD", "Total Liabilities", "Net Crypto NA
         df_display[col] = df_display[col].apply(fmt_abbrev)
 
 if "NAV per share" in df_display.columns:
-    df_display["NAV per share"] = df_display["NAV per share"].apply(lambda x: f"${x:,.2f}" if pd.notnull(x) else "–")
+    df_display["NAV per share"] = df_display["NAV per share"].apply(lambda x: fmt_abbrev(x) if pd.notnull(x) else "–")
 if "Share price USD" in df_display.columns:
-    df_display["Share price USD"] = df_display["Share price USD"].apply(lambda x: f"${x:,.2f}" if pd.notnull(x) else "–")
+    df_display["Share price USD"] = df_display["Share price USD"].apply(lambda x: fmt_abbrev(x) if pd.notnull(x) else "–")
 if "% of Mkt Cap" in df_display.columns:
     df_display["% of Mkt Cap"] = df_display["% of Mkt Cap"].apply(lambda x: f"{x:.2f}%")
 if "MNAV (x)" in df_display.columns:
