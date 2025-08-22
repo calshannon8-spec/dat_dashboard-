@@ -21,7 +21,7 @@ except Exception:
     import altair as alt  # Streamlit ships with Altair
 
 APP_DIR = Path(__file__).parent.resolve()
-st.set_page_config(page_title="DAT Dashboard", page_icon="🟠", layout="wide")
+st.set_page_config(page_title="DAT Dashboard", page_icon="🟠")
 
 # ------------------------------------------------------------------
 # Intro / Glossary
@@ -41,39 +41,6 @@ st.markdown(
     """,
     unsafe_allow_html=False,
 )
-
-
-# ------------------------------------------------------------------
-# Global styling and Plotly theming (Hyperliquid vibe)
-
-st.markdown(
-    """
-    <style>
-    body { background-color: #0d1117; color: #c9d1d9; }
-    .stApp { max-width: 1400px; margin: auto; }
-    .card { background-color: #161b22; padding: 1rem; border-radius: 6px; margin-bottom: 0.5rem; }
-    .card-title { font-size: 0.8rem; color: #8b949e; margin-bottom: 0.25rem; }
-    .card-value { font-size: 1.4rem; font-variant-numeric: tabular-nums; color: #c9d1d9; }
-    .controls { position: sticky; top: 0; background-color: #0d1117; padding: 0.5rem 0; z-index: 999; border-bottom: 1px solid #30363d; }
-    .chip-button { background-color: #161b22; border: 1px solid #30363d; color: #c9d1d9; border-radius: 16px; padding: 0.25rem 0.75rem; margin-right: 0.5rem; cursor: pointer; }
-    .chip-button:hover { background-color: #21262d; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-def apply_plotly_dark(fig):
-    """Apply a consistent dark theme to Plotly figures."""
-    fig.update_layout(
-        paper_bgcolor="#0d1117",
-        plot_bgcolor="#0d1117",
-        font_color="#c9d1d9",
-        margin=dict(l=40, r=20, t=40, b=40),
-        legend=dict(bgcolor="rgba(0,0,0,0)")
-    )
-    fig.update_xaxes(showgrid=True, gridcolor="#1c2733", zerolinecolor="#1c2733")
-    fig.update_yaxes(showgrid=True, gridcolor="#1c2733", zerolinecolor="#1c2733")
-    return fig
 
 # Track CSV source and load time for display
 LOADED_CSV_NAME: str | None = None  # name of the CSV file loaded for screener
@@ -617,24 +584,7 @@ tab_overview, tab_charts, tab_table = st.tabs(["Overview", "Charts", "Table"])
 
 with tab_overview:
     st.subheader("Overview")
-    
-
-# --- KPI cards (Hyperliquid-style) ---
-total_treasury_overview = float(np.nansum(df_view["Treasury USD"])) if not df_view.empty else 0.0
-total_liabilities_overview = float(np.nansum(df_view["Total Liabilities"])) if not df_view.empty else 0.0
-total_net_nav_overview = float(np.nansum(df_view["Net Crypto NAV"])) if not df_view.empty else 0.0
-debt_nav_ratio = (total_liabilities_overview / total_net_nav_overview) if total_net_nav_overview not in (0, None) else None
-k1, k2, k3, k4 = st.columns(4)
-with k1:
-    st.markdown(f"<div class='card'><div class='card-title'>Total Treasury</div><div class='card-value'>{fmt_money(total_treasury_overview)}</div></div>", unsafe_allow_html=True)
-with k2:
-    st.markdown(f"<div class='card'><div class='card-title'>Total Liabilities</div><div class='card-value'>{fmt_money(total_liabilities_overview)}</div></div>", unsafe_allow_html=True)
-with k3:
-    debt_display = f"{debt_nav_ratio:.2f}x" if (debt_nav_ratio is not None and not np.isinf(debt_nav_ratio)) else "–"
-    st.markdown(f"<div class='card'><div class='card-title'>Debt / NAV</div><div class='card-value'>{debt_display}</div></div>", unsafe_allow_html=True)
-with k4:
-    st.markdown(f"<div class='card'><div class='card-title'>24h Δ NAV</div><div class='card-value'>–</div></div>", unsafe_allow_html=True)
-# Compute aggregated metrics
+    # Compute aggregated metrics
     total_treasury = np.nansum(df_view["Treasury USD"])
     total_liabilities = np.nansum(df_view["Total Liabilities"])
     # Compute average MNAV across companies, ignoring NaN and infinite values
@@ -707,60 +657,99 @@ with tab_charts:
                 # Initialize global selection from this selector
                 st.session_state["global_ticker_selection"] = st.session_state[sel_key_top].copy()
 
-        
-# --- Sticky-like horizontal controls row ---
-ctrl_cols = st.columns([1, 1, 3, 2], gap="small")
-def _select_all_top():
-    st.session_state[sel_key_top] = all_tickers_top.copy()
-    _update_global_top()
-def _select_top10():
-    st.session_state[sel_key_top] = top10_tickers_top.copy()
-    _update_global_top()
-with ctrl_cols[0]:
-    st.button("All", key=f"{sel_key_top}_all", on_click=_select_all_top, help="Select all tickers")
-with ctrl_cols[1]:
-    st.button("Top 10", key=f"{sel_key_top}_top10", on_click=_select_top10, help="Top 10 by treasury")
-with ctrl_cols[2]:
-    st.multiselect("Ticker", options=all_tickers_top, default=st.session_state[sel_key_top], key=sel_key_top, on_change=_update_global_top)
-with ctrl_cols[3]:
-    st.slider("Stablecoin % floor", min_value=0.0, max_value=1.0, value=0.0, step=0.01, key="stable_floor")
-# Retrieve the currently selected tickers (empty list means show all)
-selected_tickers_top = st.session_state.get(sel_key_top, all_tickers_top).copy()
-if selected_tickers_top:
-    filtered_top = data_top[data_top["Ticker"].isin(selected_tickers_top)]
-else:
-    filtered_top = data_top.copy()
-_top = filtered_top.sort_values("Treasury USD", ascending=False).head(10) if not filtered_top.empty else pd.DataFrame(columns=["Ticker", "name", "Treasury USD"])
-if not _top.empty:
-    if HAS_PLOTLY:
-        df_plot = _top.copy()
-        df_plot["value_str"] = df_plot["Treasury USD"].apply(_format_number_no_currency)
-        max_val_top = df_plot["Treasury USD"].max() if not df_plot["Treasury USD"].empty else 0
-        if max_val_top and max_val_top > 0:
-            tickvals_top = np.linspace(0, max_val_top, 5)
-            ticktext_top = [_format_number_no_currency(v) for v in tickvals_top]
-        else:
-            tickvals_top = [0]
-            ticktext_top = ["0"]
-        fig_top = px.bar(df_plot, x="Ticker", y="Treasury USD", text="value_str", hover_data=["name"], title=None)
-        fig_top.update_yaxes(title="Treasury (USD)", type="linear", tickmode="array", tickvals=tickvals_top, ticktext=ticktext_top)
-        fig_top.update_traces(texttemplate="%{text}", hovertemplate="<b>%{x}</b><br>Treasury: %{text}<extra></extra>")
-        fig_top = apply_plotly_dark(fig_top)
-        st.plotly_chart(fig_top, use_container_width=True)
-    else:
-        chart_top = (
-            alt.Chart(_top)
-            .mark_bar()
-            .encode(
-                x="Ticker:N",
-                y=alt.Y("Treasury USD:Q", title="Treasury (USD)", scale=alt.Scale(type="linear")),
-                tooltip=["Ticker", "name", "Treasury USD"],
+        col_chart_top, col_ctrl_top = st.columns([4, 1], gap="medium")
+        with col_ctrl_top:
+            # Multiselect for tickers; use the session key directly
+            st.multiselect(
+                "Ticker",
+                options=all_tickers_top,
+                default=st.session_state[sel_key_top],
+                key=sel_key_top,
+                on_change=_update_global_top,
             )
-            .properties(title=None)
-        )
-        st.altair_chart(chart_top, use_container_width=True)
-else:
-    st.info("No rows available for ranking.")
+
+            # Render selection buttons horizontally using columns; remove the "None" option
+            btn_cols = st.columns(2)
+
+            def _select_all_top():
+                """Select all tickers in this group."""
+                st.session_state[sel_key_top] = all_tickers_top.copy()
+                _update_global_top()
+
+            def _select_top10():
+                """Select the top 10 tickers by Treasury."""
+                st.session_state[sel_key_top] = top10_tickers_top.copy()
+                _update_global_top()
+
+            # All button
+            btn_cols[0].button(
+                "All",
+                key=f"{sel_key_top}_all",
+                on_click=_select_all_top,
+            )
+            # Top 10 button
+            btn_cols[1].button(
+                "Top 10",
+                key=f"{sel_key_top}_top10",
+                on_click=_select_top10,
+            )
+
+        # Retrieve the currently selected tickers (empty list means show all)
+        selected_tickers_top = st.session_state.get(sel_key_top, all_tickers_top).copy()
+        if selected_tickers_top:
+            filtered_top = data_top[data_top["Ticker"].isin(selected_tickers_top)]
+        else:
+            filtered_top = data_top.copy()
+        _top = filtered_top.sort_values("Treasury USD", ascending=False).head(10) if not filtered_top.empty else pd.DataFrame(columns=["Ticker", "name", "Treasury USD"])
+        if not _top.empty:
+            if HAS_PLOTLY:
+                df_plot = _top.copy()
+                df_plot["value_str"] = df_plot["Treasury USD"].apply(_format_number_no_currency)
+                max_val_top = df_plot["Treasury USD"].max() if not df_plot["Treasury USD"].empty else 0
+                if max_val_top and max_val_top > 0:
+                    tickvals_top = np.linspace(0, max_val_top, 5)
+                    ticktext_top = [_format_number_no_currency(v) for v in tickvals_top]
+                else:
+                    tickvals_top = [0]
+                    ticktext_top = ["0"]
+                fig_top = px.bar(
+                    df_plot,
+                    x="Ticker",
+                    y="Treasury USD",
+                    text="value_str",
+                    hover_data=["name"],
+                    title=None,
+                )
+                fig_top.update_yaxes(
+                    title="Treasury (USD)",
+                    type="linear",
+                    tickmode="array",
+                    tickvals=tickvals_top,
+                    ticktext=ticktext_top,
+                )
+                fig_top.update_traces(
+                    texttemplate="%{text}",
+                    hovertemplate="<b>%{x}</b><br>Treasury: %{text}<extra></extra>",
+                )
+                col_chart_top.plotly_chart(fig_top, use_container_width=True)
+            else:
+                chart_top = (
+                    alt.Chart(_top)
+                    .mark_bar()
+                    .encode(
+                        x="Ticker:N",
+                        y=alt.Y(
+                            "Treasury USD:Q",
+                            title="Treasury (USD)",
+                            scale=alt.Scale(type="linear"),
+                        ),
+                        tooltip=["Ticker", "name", "Treasury USD"],
+                    )
+                    .properties(title=None)
+                )
+                col_chart_top.altair_chart(chart_top, use_container_width=True)
+        else:
+            col_chart_top.info("No rows available for ranking.")
 
     # ------------------------------------------------------------------
     # Sub‑tab 2: Market Cap vs Treasury scatter
@@ -798,7 +787,6 @@ else:
                 fig_sc.update_yaxes(title="% of Market Cap", tickformat=".2%")
                 # Provide a vertical legend if necessary
                 fig_sc.update_layout(legend=dict(orientation="v", y=1, x=1.02))
-                fig_sc = apply_plotly_dark(fig_sc)
                 st.plotly_chart(fig_sc, use_container_width=True)
             else:
                 chart_sc = (
@@ -866,7 +854,6 @@ else:
                 )
                 # Place legend on the right for long lists
                 fig_ln.update_layout(legend=dict(orientation="v", y=1, x=1.02))
-                fig_ln = apply_plotly_dark(fig_ln)
                 st.plotly_chart(fig_ln, use_container_width=True)
             else:
                 # For Altair fallback, show values directly
