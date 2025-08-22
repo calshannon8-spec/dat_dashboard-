@@ -636,44 +636,66 @@ with tab_charts:
             if not data_top.empty
             else []
         )
+        # Session state key for this selector
         sel_key_top = "sel_top_tickers"
-        widget_key_top = sel_key_top + "_widget"
+        # Ensure the selection key exists and default to all tickers on first run
         if sel_key_top not in st.session_state:
             st.session_state[sel_key_top] = all_tickers_top.copy()
+
+        # Function to update the global ticker selection when the user opts to
+        def _update_global_top():
+            """Propagate the current local selection to the global state when required."""
+            if st.session_state.get("apply_to_all_charts", False):
+                st.session_state["global_ticker_selection"] = st.session_state.get(sel_key_top, []).copy()
+
+        # When 'apply_to_all_charts' is enabled, sync the local selection with the global selection
         if st.session_state.get("apply_to_all_charts", False):
             if st.session_state.get("global_ticker_selection"):
-                st.session_state[sel_key_top] = st.session_state["global_ticker_selection"]
+                # Use the previously stored global selection
+                st.session_state[sel_key_top] = st.session_state["global_ticker_selection"].copy()
             else:
-                st.session_state["global_ticker_selection"] = st.session_state[sel_key_top]
+                # Initialize global selection from this selector
+                st.session_state["global_ticker_selection"] = st.session_state[sel_key_top].copy()
+
         col_chart_top, col_ctrl_top = st.columns([4, 1], gap="medium")
         with col_ctrl_top:
-            selected_top = st.multiselect(
+            # Multiselect for tickers; use the session key directly
+            st.multiselect(
                 "Ticker",
                 options=all_tickers_top,
                 default=st.session_state[sel_key_top],
-                key=widget_key_top,
+                key=sel_key_top,
+                on_change=_update_global_top,
             )
-            # Update stored selection separate from widget key
-            st.session_state[sel_key_top] = selected_top
-            chip_all, chip_none, chip_top = st.columns(3)
-            if chip_all.button("All", key=f"{sel_key_top}_all"):
+
+            # Render selection buttons horizontally using columns; remove the "None" option
+            btn_cols = st.columns(2)
+
+            def _select_all_top():
+                """Select all tickers in this group."""
                 st.session_state[sel_key_top] = all_tickers_top.copy()
-                st.session_state[widget_key_top] = all_tickers_top.copy()
-                if st.session_state.get("apply_to_all_charts", False):
-                    st.session_state["global_ticker_selection"] = all_tickers_top.copy()
-            if chip_none.button("None", key=f"{sel_key_top}_none"):
-                st.session_state[sel_key_top] = []
-                st.session_state[widget_key_top] = []
-                if st.session_state.get("apply_to_all_charts", False):
-                    st.session_state["global_ticker_selection"] = []
-            if chip_top.button("Top 10", key=f"{sel_key_top}_top10"):
+                _update_global_top()
+
+            def _select_top10():
+                """Select the top 10 tickers by Treasury."""
                 st.session_state[sel_key_top] = top10_tickers_top.copy()
-                st.session_state[widget_key_top] = top10_tickers_top.copy()
-                if st.session_state.get("apply_to_all_charts", False):
-                    st.session_state["global_ticker_selection"] = top10_tickers_top.copy()
-            if st.session_state.get("apply_to_all_charts", False):
-                st.session_state["global_ticker_selection"] = st.session_state[sel_key_top]
-        selected_tickers_top = st.session_state.get(sel_key_top, all_tickers_top)
+                _update_global_top()
+
+            # All button
+            btn_cols[0].button(
+                "All",
+                key=f"{sel_key_top}_all",
+                on_click=_select_all_top,
+            )
+            # Top 10 button
+            btn_cols[1].button(
+                "Top 10",
+                key=f"{sel_key_top}_top10",
+                on_click=_select_top10,
+            )
+
+        # Retrieve the currently selected tickers (empty list means show all)
+        selected_tickers_top = st.session_state.get(sel_key_top, all_tickers_top).copy()
         if selected_tickers_top:
             filtered_top = data_top[data_top["Ticker"].isin(selected_tickers_top)]
         else:
