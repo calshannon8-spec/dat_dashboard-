@@ -144,30 +144,6 @@ def fx_map_usd() -> dict:
         "GBP": fetch_fx("GBPUSD=X") or 1.27,
     }
 
-# Formatting helper to abbreviate large numbers for display (e.g., 1.23B or 456M).
-def fmt_abbrev(v):
-    """
-    Convert a numeric value into a human‑friendly dollar string.
-    Examples:
-      1,234,567 -> "$1.23M"
-      2,000,000,000 -> "$2.00B"
-    Negative numbers retain the minus sign.
-    Values below one million are shown as full integers with separators.
-    """
-    try:
-        n = float(v)
-    except Exception:
-        return v
-    sign = "-" if n < 0 else ""
-    n = abs(n)
-    if n >= 1_000_000_000_000:
-        return f"{sign}${n/1_000_000_000_000:,.2f}T"
-    if n >= 1_000_000_000:
-        return f"{sign}${n/1_000_000_000:,.2f}B"
-    if n >= 1_000_000:
-        return f"{sign}${n/1_000_000:,.2f}M"
-    return f"{sign}${n:,.0f}"
-
 EXCHANGE_TO_CCY = {
     "NASDAQ": "USD", "NYSE": "USD",
     "TSXV": "CAD",
@@ -299,20 +275,18 @@ st.subheader("Live Prices (USD)")
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_prices():
     url = "https://api.coingecko.com/api/v3/simple/price"
-    params = {"ids": "bitcoin,ethereum", "vs_currencies": "usd"}
+    params = {"ids": "bitcoin,ethereum,usd-coin", "vs_currencies": "usd"}
     r = requests.get(url, params=params, timeout=15)
     r.raise_for_status()
     data = r.json()
-    # Only return BTC and ETH prices; USDC is omitted since it is pegged to 1 USD
-    return {"BTC": data["bitcoin"]["usd"], "ETH": data["ethereum"]["usd"]}
+    return {"BTC": data["bitcoin"]["usd"], "ETH": data["ethereum"]["usd"], "USDC": data["usd-coin"]["usd"]}
 
 try:
     prices = fetch_prices()
-    c = st.columns(2)
-    # Display BTC and ETH as full dollar amounts with thousands separators, no decimals
+    c = st.columns(3)
     c[0].metric("BTC", f"${prices['BTC']:,}")
     c[1].metric("ETH", f"${prices['ETH']:,}")
-    # No USDC display since it is pegged to 1 USD
+    c[2].metric("USDC", f"${prices['USDC']:,}")
     st.caption("Last updated: " + datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S %Z"))
 except Exception as e:
     prices = {"BTC": 0.0, "ETH": 0.0, "USDC": 0.0}
@@ -320,7 +294,59 @@ except Exception as e:
     st.exception(e)
 
 st.divider()
-## Wallet functionality removed; all holdings are sourced from the CSV.
+st.header("Wallet Balances (ETH Mainnet)")
+with st.sidebar:
+    st.subheader("API / Wallet Settings")
+    covalent_api_key = st.text_input("Covalent API Key", type="password")
+    eth_address = st.text_input("ETH Address (0x...)", placeholder="e.g., 0x742d35Cc6634C0532925a3b844Bc454e4438f44e")
+    fetch_btn = st.button("Fetch Balances")
+
+def fetch_eth_balances_covalent(api_key: str, address: str):
+    if not api_key or not address:
+        raise ValueError("API key and address are required.")
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+    session = requests.Session()
+    retries = Retry(total=3, backoff_factor=0.8, status_forcelist=[429,500,502,503,504], allowed_methods=["GET"], raise_on_status=False)
+    session.mount("https://", HTTPAdapter(max_retries=retries))
+    url = f"https://api.covalenthq.com/v1/1/address/{address}/balances_v2/"
+    r = session.get(url, params={"key": api_key, "nft":"false", "no-nft-fetch":"true", "quote-currency":"USD"}, timeout=45)
+    r.raise_for_status()
+    items = (r.json().get("data",{}) or {}).get("items",[]) or []
+    rows = []
+    for it in items:
+        try:
+            decimals = it.get("contract_decimals", 0) or 0
+            human = int(it.get("balance","0") or "0") / (10**decimals)
+        except Exception:
+            human = None
+        if human and abs(human) > 0:
+            rows.append({
+                "Token": it.get("contract_ticker_symbol",""),
+                "Name": it.get("contract_name",""),
+                "Amount": human,
+                "USD (quote)": it.get("quote"),
+                "Explorer": f"https://etherscan.io/token/{it.get('contract_address')}?a={address}" if it.get("contract_address") else f"https://etherscan.io/address/{address}",
+            })
+    dfw = pd.DataFrame(rows)
+    if not dfw.empty and "USD (quote)" in dfw.columns:
+        dfw = dfw.sort_values(by=["USD (quote)"], ascending=False, na_position="last")
+    return dfw, f"https://etherscan.io/address/{address}"
+
+if fetch_btn:
+    with st.spinner("Fetching balances…"):
+        try:
+            dfw, addr_link = fetch_eth_balances_covalent(covalent_api_key, eth_address)
+            st.markdown(f"**Address:** [{eth_address}]({addr_link})")
+            if dfw.empty:
+                st.info("No non-zero token balances found.")
+            else:
+                dfw = dfw.copy()
+                dfw["Explorer"] = dfw["Explorer"].apply(lambda u: f"[link]({u})")
+                st.dataframe(dfw, use_container_width=True)
+        except Exception as e:
+            st.error("Couldn’t fetch balances.")
+            st.exception(e)
 
 # -------------------- Company Screener --------------------------
 
@@ -451,154 +477,100 @@ else:
 
 _mc_min = float(df_view["Mkt Cap (USD)"].min() if not df_view.empty else 0.0)
 _mc_max = float(df_view["Mkt Cap (USD)"].max() if not df_view.empty else 0.0)
-_lo, _hi = st.sidebar.slider(
-    "Market Cap (USD, millions)",
-    min_value=0.0,
-    max_value=max(1.0, _mc_max / 1e6),
-    value=(0.0, max(1.0, _mc_max / 1e6)),
-)
-df_view = df_view[(df_view["Mkt Cap (USD)"] >= _lo * 1e6) & (df_view["Mkt Cap (USD)"] <= _hi * 1e6)]
+_lo, _hi = st.sidebar.slider("Market Cap (USD, millions)",
+                             min_value=0.0,
+                             max_value=max(1.0, _mc_max/1e6),
+                             value=(0.0, max(1.0, _mc_max/1e6)))
+df_view = df_view[(df_view["Mkt Cap (USD)"] >= _lo*1e6) & (df_view["Mkt Cap (USD)"] <= _hi*1e6)]
 
-# Build tabs for Overview, Charts and Table
-tab_overview, tab_charts, tab_table = st.tabs(["Overview", "Charts", "Table"])
+st.subheader("Overview")
+c1, c2, c3 = st.columns(3)
+c1.metric("Total Treasury", f"${np.nansum(df_view['Treasury USD']):,.0f}")
+c2.metric("Total Liabilities", f"${np.nansum(df_view['Total Liabilities']):,.0f}")
+c3.metric("Net NAV (sum)", f"${(np.nansum(df_view['Treasury USD']) - np.nansum(df_view['Total Liabilities'])):,.0f}")
 
-with tab_overview:
-    st.subheader("Overview")
-    # Compute aggregated metrics
-    total_treasury = np.nansum(df_view["Treasury USD"])
-    total_liabilities = np.nansum(df_view["Total Liabilities"])
-    # Compute average MNAV across companies, ignoring NaN and infinite values
-    avg_mnav_series = df_view["MNAV (x)"].replace([np.inf, -np.inf], np.nan).dropna()
-    avg_mnav_value = float(avg_mnav_series.mean()) if not avg_mnav_series.empty else np.nan
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total Treasury", fmt_abbrev(total_treasury))
-    c2.metric("Total Liabilities", fmt_abbrev(total_liabilities))
-    c3.metric("Average MNAV", f"{avg_mnav_value:.2f}x" if pd.notnull(avg_mnav_value) else "–")
-    st.caption(f"Filtered rows: {len(df_view)} / {len(df)}")
-
-with tab_charts:
-    # Top Treasuries bar chart (existing)
-    st.subheader("Top Treasuries")
-    _top = df_view[["Ticker", "name", "Treasury USD"]].dropna().sort_values("Treasury USD", ascending=False).head(10)
-    if not _top.empty:
-        if HAS_PLOTLY:
-            fig = px.bar(
-                _top,
-                x="Ticker",
-                y="Treasury USD",
-                hover_data=["name", "Treasury USD"],
-                title="Top 10 by Treasury (USD)",
-            )
-            fig.update_yaxes(title="Treasury (USD)", tickformat="~s")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            chart = (
-                alt.Chart(_top)
-                .mark_bar()
-                .encode(
-                    x="Ticker:N",
-                    y=alt.Y("Treasury USD:Q", title="Treasury (USD)"),
-                    tooltip=["Ticker", "name", "Treasury USD"],
-                )
-                .properties(title="Top 10 by Treasury (USD)")
-            )
-            st.altair_chart(chart, use_container_width=True)
+st.subheader("Top Treasuries")
+_top = df_view[["Ticker","name","Treasury USD"]].dropna().sort_values("Treasury USD", ascending=False).head(10)
+if not _top.empty:
+    if HAS_PLOTLY:
+        fig = px.bar(_top, x="Ticker", y="Treasury USD", hover_data=["name","Treasury USD"], title="Top 10 by Treasury (USD)")
+        fig.update_yaxes(title="Treasury (USD)", tickformat="~s")
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("No rows available for ranking.")
+        chart = (alt.Chart(_top).mark_bar()
+                 .encode(x="Ticker:N", y=alt.Y("Treasury USD:Q", title="Treasury (USD)"),
+                         tooltip=["Ticker","name","Treasury USD"])
+                 .properties(title="Top 10 by Treasury (USD)"))
+        st.altair_chart(chart, use_container_width=True)
+else:
+    st.info("No rows available for ranking.")
 
-    # New grouped bar chart: Liabilities vs Net Crypto NAV
-    st.subheader("Liabilities vs Net Crypto NAV")
-    # Prepare data for the bar chart: select top 12 by Net Crypto NAV
-    df_bar = df_view[["Ticker", "Net Crypto NAV", "Total Liabilities", "name"]].copy()
-    if not df_bar.empty:
-        df_bar = df_bar.sort_values("Net Crypto NAV", ascending=False).head(12)
-        df_bar = pd.melt(
-            df_bar,
-            id_vars=["Ticker", "name"],
-            value_vars=["Net Crypto NAV", "Total Liabilities"],
-            var_name="Metric",
-            value_name="Amount",
+st.subheader("Treasury % of Market Cap vs Market Cap")
+_sc = df_view[["Ticker","name","Treasury USD","Mkt Cap (USD)","% of Mkt Cap"]].dropna()
+if not _sc.empty:
+    # convert % to fraction for plotting as percentage axis
+    _sc = _sc.assign(pct=_sc["% of Mkt Cap"] / 100.0)
+    if HAS_PLOTLY:
+        # Use a linear x-axis for better accessibility; retain compact tick formatting
+        fig2 = px.scatter(
+            _sc,
+            x="Mkt Cap (USD)",
+            y="pct",
+            size="Treasury USD",
+            hover_data=["Ticker", "name"],
+            title="Treasury % of Market Cap vs Market Cap",
         )
-        if HAS_PLOTLY:
-            fig_bar = px.bar(
-                df_bar,
-                x="Ticker",
-                y="Amount",
-                color="Metric",
-                barmode="group",
-                hover_data=["name", "Metric", "Amount"],
-                title="Liabilities vs Net Crypto NAV by Company",
-            )
-            fig_bar.update_yaxes(title="Amount", tickformat="~s")
-            st.plotly_chart(fig_bar, use_container_width=True)
-        else:
-            chart_bar = (
-                alt.Chart(df_bar)
-                .mark_bar()
-                .encode(
-                    x="Ticker:N",
-                    y=alt.Y("Amount:Q", title="Amount"),
-                    color="Metric:N",
-                    tooltip=["Ticker", "name", "Metric", "Amount"],
-                )
-                .properties(title="Liabilities vs Net Crypto NAV by Company")
-            )
-            st.altair_chart(chart_bar, use_container_width=True)
+        fig2.update_xaxes(title="Market Cap (USD)", tickformat="~s")
+        fig2.update_yaxes(title="% of Market Cap", tickformat=".2%")
+        st.plotly_chart(fig2, use_container_width=True)
     else:
-        st.info("Not enough data for Liabilities vs Net Crypto NAV chart.")
-
-    # Scatter plot: Treasury % of Market Cap vs Market Cap (linear scale)
-    st.subheader("Treasury % of Market Cap vs Market Cap")
-    _sc = df_view[["Ticker", "name", "Treasury USD", "Mkt Cap (USD)", "% of Mkt Cap"]].dropna()
-    if not _sc.empty:
-        _sc = _sc.assign(pct=_sc["% of Mkt Cap"] / 100.0)
-        if HAS_PLOTLY:
-            fig2 = px.scatter(
-                _sc,
-                x="Mkt Cap (USD)",
-                y="pct",
-                size="Treasury USD",
-                hover_data=["Ticker", "name"],
-                title="Treasury % of Market Cap vs Market Cap",
+        # Altair fallback with linear scale on x-axis
+        chart2 = (
+            alt.Chart(_sc)
+            .mark_circle()
+            .encode(
+                x=alt.X("Mkt Cap (USD):Q", title="Market Cap (USD)"),
+                y=alt.Y("pct:Q", title="% of Market Cap"),
+                size="Treasury USD:Q",
+                tooltip=[
+                    "Ticker",
+                    "name",
+                    "Treasury USD",
+                    "Mkt Cap (USD)",
+                    "% of Mkt Cap",
+                ],
             )
-            fig2.update_xaxes(title="Market Cap (USD)", tickformat="~s")
-            fig2.update_yaxes(title="% of Market Cap", tickformat=".2%")
-            st.plotly_chart(fig2, use_container_width=True)
-        else:
-            chart2 = (
-                alt.Chart(_sc)
-                .mark_circle()
-                .encode(
-                    x=alt.X("Mkt Cap (USD):Q", title="Market Cap (USD)"),
-                    y=alt.Y("pct:Q", title="% of Market Cap"),
-                    size="Treasury USD:Q",
-                    tooltip=["Ticker", "name", "Treasury USD", "Mkt Cap (USD)", "% of Mkt Cap"],
-                )
-                .properties(title="Treasury % of Market Cap vs Market Cap")
-            )
-            st.altair_chart(chart2, use_container_width=True)
-    else:
-        st.info("Not enough data for scatter.")
+        )
+        st.altair_chart(chart2, use_container_width=True)
+else:
+    st.info("Not enough data for scatter.")
 
-with tab_table:
-    st.subheader("Company Screener Table")
-    # Format the display DataFrame with abbreviated numbers
-    df_display = df_view.copy()
-    for col in ["Mkt Cap (USD)", "Treasury USD", "Total Liabilities", "Net Crypto NAV"]:
-        if col in df_display.columns:
-            df_display[col] = df_display[col].apply(fmt_abbrev)
-    if "NAV per share" in df_display.columns:
-        df_display["NAV per share"] = df_display["NAV per share"].apply(
-            lambda x: f"${x:,.2f}" if pd.notnull(x) else "–"
-        )
-    if "Share price USD" in df_display.columns:
-        df_display["Share price USD"] = df_display["Share price USD"].apply(
-            lambda x: f"${x:,.2f}" if pd.notnull(x) else "–"
-        )
-    if "% of Mkt Cap" in df_display.columns:
-        df_display["% of Mkt Cap"] = df_display["% of Mkt Cap"].apply(lambda x: f"{x:.2f}%")
-    if "MNAV (x)" in df_display.columns:
-        df_display["MNAV (x)"] = df_display["MNAV (x)"].apply(
-            lambda x: f"{x:.2f}x" if pd.notnull(x) else "–"
-        )
-    st.dataframe(df_display, use_container_width=True)
+st.caption(f"Filtered rows: {len(df_view)} / {len(df)}")
+
+# -------------------- Table (formatted) -------------------------
+
+def fmt_abbrev(v):
+    try: n = float(v)
+    except Exception: return v
+    sign = "-" if n < 0 else ""
+    n = abs(n)
+    if n >= 1_000_000_000_000: return f"{sign}${n/1_000_000_000_000:,.2f}T"
+    if n >= 1_000_000_000:     return f"{sign}${n/1_000_000_000:,.2f}B"
+    if n >= 1_000_000:         return f"{sign}${n/1_000_000:,.2f}M"
+    return f"{sign}${n:,.0f}"
+
+df_display = df_view.copy()
+for col in ["Mkt Cap (USD)", "Treasury USD", "Total Liabilities", "Net Crypto NAV"]:
+    if col in df_display.columns:
+        df_display[col] = df_display[col].apply(fmt_abbrev)
+
+if "NAV per share" in df_display.columns:
+    df_display["NAV per share"] = df_display["NAV per share"].apply(lambda x: f"${x:,.2f}" if pd.notnull(x) else "–")
+if "Share price USD" in df_display.columns:
+    df_display["Share price USD"] = df_display["Share price USD"].apply(lambda x: f"${x:,.2f}" if pd.notnull(x) else "–")
+if "% of Mkt Cap" in df_display.columns:
+    df_display["% of Mkt Cap"] = df_display["% of Mkt Cap"].apply(lambda x: f"{x:.2f}%")
+if "MNAV (x)" in df_display.columns:
+    df_display["MNAV (x)"] = df_display["MNAV (x)"].apply(lambda x: f"{x:.2f}x" if pd.notnull(x) else "–")
+
+st.dataframe(df_display, use_container_width=True)
