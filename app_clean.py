@@ -562,17 +562,66 @@ with tab_charts:
     st.subheader("Liabilities vs Net Crypto NAV")
     liab_nav_df = df_view[["Ticker", "Total Liabilities", "Net Crypto NAV"]].dropna()
     if not liab_nav_df.empty:
-        liab_nav_long = liab_nav_df.melt(id_vars=["Ticker"], value_vars=["Total Liabilities", "Net Crypto NAV"], var_name="Metric", value_name="Amount")
+        # Prepare a long-form DataFrame for bar plotting
+        liab_nav_long = liab_nav_df.melt(
+            id_vars=["Ticker"],
+            value_vars=["Total Liabilities", "Net Crypto NAV"],
+            var_name="Metric",
+            value_name="Amount",
+        )
         if HAS_PLOTLY:
-            fig_ln = px.bar(liab_nav_long, x="Ticker", y="Amount", color="Metric", barmode="group",
-                             title="Liabilities vs Net Crypto NAV by Company")
-            fig_ln.update_yaxes(tickformat="~s")
+            # Compute values in billions for labels and tooltips
+            liab_nav_long = liab_nav_long.copy()
+            liab_nav_long["Amount_B"] = liab_nav_long["Amount"] / 1e9
+            # Create grouped bar chart using original amounts for scale but display billions in labels
+            fig_ln = px.bar(
+                liab_nav_long,
+                x="Ticker",
+                y="Amount",
+                color="Metric",
+                barmode="group",
+                text="Amount_B",
+                title="Liabilities vs Net Crypto NAV by Company",
+            )
+            # Determine y‑axis tick positions and labels so that billions are shown with "B" suffix
+            max_val = liab_nav_long["Amount"].max() if not liab_nav_long["Amount"].empty else 0
+            # Always compute at least two ticks to avoid division by zero; fallback to [0] if max_val == 0
+            if max_val and max_val > 0:
+                # Use five evenly spaced ticks from 0 to max_val
+                num_ticks = 5
+                tickvals = np.linspace(0, max_val, num_ticks)
+                ticktext = [f"{v/1e9:.2f}B" for v in tickvals]
+            else:
+                tickvals = [0]
+                ticktext = ["0B"]
+            # Update y‑axis: ensure linear scale and apply custom ticks/text
+            fig_ln.update_yaxes(
+                title="Amount (B USD)",
+                type="linear",
+                tickmode="array",
+                tickvals=tickvals,
+                ticktext=ticktext,
+            )
+            # Use consistent bar text and hover templates to display billions with suffix "B"
+            fig_ln.update_traces(
+                texttemplate="%{text:.2f}B",
+                hovertemplate="<b>%{x}</b><br>%{fullData.name}: %{text:.2f}B<extra></extra>",
+            )
+            # Preserve existing styles such as colors, gridlines, and legend
             st.plotly_chart(fig_ln, use_container_width=True)
         else:
-            ln_chart = (alt.Chart(liab_nav_long).mark_bar()
-                        .encode(x="Ticker:N", y=alt.Y("Amount:Q", title="Amount (USD)"), color="Metric:N",
-                                tooltip=["Ticker", "Metric", "Amount"])
-                        .properties(title="Liabilities vs Net Crypto NAV by Company"))
+            # For Altair fallback, keep original values but rely on automatic formatting (no 'G' units)
+            ln_chart = (
+                alt.Chart(liab_nav_long)
+                .mark_bar()
+                .encode(
+                    x="Ticker:N",
+                    y=alt.Y("Amount:Q", title="Amount (USD)", scale=alt.Scale(type="linear")),
+                    color="Metric:N",
+                    tooltip=["Ticker", "Metric", "Amount"],
+                )
+                .properties(title="Liabilities vs Net Crypto NAV by Company")
+            )
             st.altair_chart(ln_chart, use_container_width=True)
     else:
         st.info("No data for liabilities vs Net Crypto NAV chart.")
