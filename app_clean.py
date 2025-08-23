@@ -62,21 +62,21 @@ selected_analysis_label = st.selectbox(
 )
 analysis_key = analysis_options[selected_analysis_label]
 
-if analysis_key == "overview":
-    # compute and display total treasury, liabilities, etc.
-    # ...
-elif analysis_key == "treasury":
-    # render Top 10 by Treasury bar chart
-    # ...
-elif analysis_key == "market_vs_treasury":
-    # render Market Cap vs Treasury scatter plot
-    # ...
-elif analysis_key == "valuation":
-    # render Liabilities vs Net Crypto NAV bar chart
-    # ...
-elif analysis_key == "table":
-    # render the screener table
-    # ...
+    if analysis_key == "overview":
+        # compute and display total treasury, liabilities, etc.
+        # ...
+    elif analysis_key == "treasury":
+        # render Top 10 by Treasury bar chart
+        # ...
+    elif analysis_key == "market_vs_treasury":
+        # render Market Cap vs Treasury scatter plot
+        # ...
+    elif analysis_key == "valuation":
+        # render Liabilities vs Net Crypto NAV bar chart
+        # ...
+    elif analysis_key == "table":
+        # render the screener table
+        # ...
 
 
 
