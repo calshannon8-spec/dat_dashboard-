@@ -21,7 +21,7 @@ except Exception:
     import altair as alt  # Streamlit ships with Altair
 
 APP_DIR = Path(__file__).parent.resolve()
-st.set_page_config(page_title="DAT Dashboard", page_icon="🟠")
+st.set_page_config(page_title="Digital Asset Treasury Dashboard", page_icon="🟠")
 
 # ------------------------------------------------------------------
 # Intro / Glossary
@@ -29,11 +29,11 @@ st.set_page_config(page_title="DAT Dashboard", page_icon="🟠")
 # Provide a brief explainer for the dashboard and define terms (NAV/MNAV).
 st.markdown(
     """
-    ### Data & Analytics Tool (DAT) Dashboard
+    ### Digital Asset Treasury Dashboard
 
-    Welcome! This dashboard provides insights into publicly listed companies that hold crypto assets.
-    Use the **Overview**, **Charts**, and **Table** tabs to explore treasury balances, liabilities and
-    market valuations.\n
+    This dashboard provides insights into publicly listed companies that hold digital assets.  
+    Use the selector below to explore treasury composition, market capitalization versus crypto treasury, valuation & MNAV, and to view a full screener table.  
+
     **Glossary:**
     - **Net Crypto NAV**: Treasury USD minus total liabilities.
     - **NAV per share**: Net Crypto NAV divided by shares outstanding.
@@ -45,6 +45,40 @@ st.markdown(
 # Track CSV source and load time for display
 LOADED_CSV_NAME: str | None = None  # name of the CSV file loaded for screener
 LOADED_TIME: datetime | None = None  # timestamp when the CSV was processed
+
+# Analysis selector (place this in the main content, not in st.sidebar)
+analysis_options = {
+    "Overview": "overview",
+    "Treasury Composition": "treasury",
+    "Market Cap vs Treasury": "market_vs_treasury",
+    "Valuation & MNAV": "valuation",
+    "Table": "table",
+}
+selected_analysis_label = st.selectbox(
+    "Select analysis",
+    list(analysis_options.keys()),
+    index=0,
+    help="Choose which section of the dashboard to view.",
+)
+analysis_key = analysis_options[selected_analysis_label]
+
+if analysis_key == "overview":
+    # compute and display total treasury, liabilities, etc.
+    # ...
+elif analysis_key == "treasury":
+    # render Top 10 by Treasury bar chart
+    # ...
+elif analysis_key == "market_vs_treasury":
+    # render Market Cap vs Treasury scatter plot
+    # ...
+elif analysis_key == "valuation":
+    # render Liabilities vs Net Crypto NAV bar chart
+    # ...
+elif analysis_key == "table":
+    # render the screener table
+    # ...
+
+
 
 # --------------------------- Helpers ----------------------------
 
@@ -441,14 +475,7 @@ if fetch_btn:
 
 # -------------------- Company Screener --------------------------
 
-st.divider()
-st.header("Company Screener (from CSV)")
 
-# Display CSV file name and load time if available
-if LOADED_CSV_NAME and LOADED_TIME:
-    st.caption(
-        f"Source CSV: {LOADED_CSV_NAME} (loaded {LOADED_TIME.strftime('%Y-%m-%d %H:%M:%S %Z')})"
-    )
 
 def with_live_fields(c: dict) -> dict:
     """Attach market cap USD, price USD, holdings, liabilities, and NAV/share."""
@@ -582,23 +609,6 @@ _lo, _hi = st.sidebar.slider(
     value=(0.0, max(1.0, _mc_max / 1e6)),
 )
 df_view = df_view[(df_view["Mkt Cap (USD)"] >= _lo * 1e6) & (df_view["Mkt Cap (USD)"] <= _hi * 1e6)]
-
-# ------------------------------------------------------------------
-# New drop‑down selector replacing the old tab layout
-analysis_options = {
-    "Overview": "overview",
-    "Treasury Composition": "treasury",
-    "Market Cap vs Treasury": "market_vs_treasury",
-    "Valuation & MNAV": "valuation",
-    "Table": "table",
-}
-selected_analysis_label = st.selectbox(
-    "Select analysis",
-    list(analysis_options.keys()),
-    index=0,
-    help="Choose which section of the dashboard to view.",
-)
-analysis_key = analysis_options[selected_analysis_label]
 
 # ------------------------------------------------------------------
 # Conditional rendering based on the selected analysis.
