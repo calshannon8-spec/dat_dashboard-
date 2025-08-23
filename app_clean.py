@@ -62,7 +62,7 @@ selected_analysis_label = st.selectbox(
 )
 analysis_key = analysis_options[selected_analysis_label]
 
-    if analysis_key == "overview":
+ if analysis_key == "overview":
         # compute and display total treasury, liabilities, etc.
         # ...
     elif analysis_key == "treasury":
