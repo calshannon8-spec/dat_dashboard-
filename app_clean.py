@@ -380,6 +380,28 @@ def fetch_prices():
     data = r.json()
     return {"BTC": data["bitcoin"]["usd"], "ETH": data["ethereum"]["usd"], "USDC": data["usd-coin"]["usd"]}
 
+# Helper to render live crypto prices below each chart section.
+def render_live_prices():
+    """Display live crypto prices (BTC, ETH, USDC) as metrics with last update timestamp."""
+    # Label for the live prices section
+    st.markdown("#### Live Crypto Prices (USD)")
+    try:
+        prices = fetch_prices()
+    except Exception:
+        st.error("Error fetching crypto prices.")
+        return
+    # Create three columns for BTC, ETH, and USDC
+    col_btc, col_eth, col_usdc = st.columns(3)
+    btc_val = prices.get("BTC")
+    eth_val = prices.get("ETH")
+    usdc_val = prices.get("USDC")
+    # Format and display metrics. Delta omitted since we do not track changes over time.
+    col_btc.metric("Bitcoin (BTC)", f"${btc_val:,.2f}" if btc_val is not None else "–")
+    col_eth.metric("Ethereum (ETH)", f"${eth_val:,.2f}" if eth_val is not None else "–")
+    col_usdc.metric("USD Coin (USDC)", f"${usdc_val:,.2f}" if usdc_val is not None else "–")
+    # Caption with the current timestamp for update time
+    st.caption(f"Prices updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
 try:
     prices = fetch_prices()
     c = st.columns(3)
@@ -611,6 +633,8 @@ if analysis_key == "overview":
     c2.metric("Total Liabilities", fmt_abbrev(total_liabilities), help="Sum of reported liabilities for the filtered companies")
     c3.metric("Average MNAV", f"{avg_mnav_value:.2f}x" if pd.notnull(avg_mnav_value) else "–", help="Mean of MNAV (market cap / net asset value)")
     st.caption(f"Filtered rows: {len(df_view)} / {len(df)}")
+    # Render live crypto prices below the overview metrics
+    render_live_prices()
     st.stop()
 
 elif analysis_key == "treasury":
@@ -670,6 +694,8 @@ elif analysis_key == "treasury":
         )
         st.altair_chart(chart_top, use_container_width=True)
 
+    # After showing the Top 10 chart, display live crypto prices
+    render_live_prices()
     st.stop()
 
 
@@ -726,6 +752,8 @@ elif analysis_key == "market_vs_treasury":
         )
         st.altair_chart(chart_sc, use_container_width=True)
 
+    # After showing the scatter chart, display live crypto prices
+    render_live_prices()
     st.stop()
 
 elif analysis_key == "valuation":
@@ -793,6 +821,8 @@ elif analysis_key == "valuation":
         )
         st.altair_chart(ln_chart, use_container_width=True)
 
+    # After showing the liabilities vs net crypto NAV chart, display live crypto prices
+    render_live_prices()
     st.stop()
 
 
@@ -820,6 +850,8 @@ elif analysis_key == "table":
         )
 
     st.dataframe(df_display, use_container_width=True)
+    # Display live crypto prices below the screener table
+    render_live_prices()
     st.stop()
 
 
