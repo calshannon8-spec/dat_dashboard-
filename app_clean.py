@@ -62,21 +62,8 @@ selected_analysis_label = st.selectbox(
 )
 analysis_key = analysis_options[selected_analysis_label]
 
- if analysis_key == "overview":
-        # compute and display total treasury, liabilities, etc.
-        # ...
- elif analysis_key == "treasury":
-        # render Top 10 by Treasury bar chart
-        # ...
- elif analysis_key == "market_vs_treasury":
-        # render Market Cap vs Treasury scatter plot
-        # ...
-elif analysis_key == "valuation":
-        # render Liabilities vs Net Crypto NAV bar chart
-        # ...
- elif analysis_key == "table":
-      # render the screener table
-        # ...
+# Note: conditional rendering based on `analysis_key` is defined
+# later in the script, after the DataFrame and filters are prepared.
 
 
 
@@ -381,7 +368,112 @@ LIABILITIES = {
     for c in companies
 }
 
+# -------------------- Live Prices -----------------------
 
+# Fetch live BTC and ETH prices from CoinGecko.  We intentionally omit USD Coin (USDC)
+# and return no decimals for display.  This section appears before the wallet settings.
+st.subheader("Live Prices (USD)")
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_prices():
+    """Retrieve current Bitcoin and Ethereum prices in USD from the CoinGecko API."""
+    url = "https://api.coingecko.com/api/v3/simple/price"
+    # Only request bitcoin and ethereum; omit usd-coin to avoid unnecessary API fields
+    params = {"ids": "bitcoin,ethereum", "vs_currencies": "usd"}
+    r = requests.get(url, params=params, timeout=15)
+    r.raise_for_status()
+    data = r.json()
+    return {
+        "BTC": data.get("bitcoin", {}).get("usd"),
+        "ETH": data.get("ethereum", {}).get("usd"),
+    }
+
+try:
+    prices = fetch_prices() or {}
+    # Display BTC and ETH prices with thousands separators and no decimals
+    cols_prices = st.columns(2)
+    btc_val = prices.get("BTC")
+    eth_val = prices.get("ETH")
+    cols_prices[0].metric("BTC", f"${btc_val:,.0f}" if btc_val is not None else "–")
+    cols_prices[1].metric("ETH", f"${eth_val:,.0f}" if eth_val is not None else "–")
+    # Show a green dot to indicate fresh data
+    green_dot = "<span style='color:green'>&#9679;</span>"
+    st.caption(
+        f"{green_dot} Last updated: "
+        + datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S %Z"),
+        unsafe_allow_html=True,
+    )
+except Exception as e:
+    # In case of failure, show dashes for unavailable prices and use zero values
+    cols_prices = st.columns(2)
+    cols_prices[0].metric("BTC", "–")
+    cols_prices[1].metric("ETH", "–")
+    # fallback default for downstream computations
+    prices = {"BTC": 0.0, "ETH": 0.0}
+    st.error("Couldn't load prices.")
+    st.exception(e)
+
+st.divider()
+# Wallet balances section is collapsible to reduce clutter
+with st.sidebar.expander("API / Wallet Settings", expanded=False):
+    st.subheader("Wallet Settings")
+    covalent_api_key = st.text_input("Covalent API Key", type="password")
+    eth_address = st.text_input(
+        "ETH Address (0x...)",
+        placeholder="e.g., 0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
+    )
+    # Only allow fetching balances when both API key and address are provided
+    fetch_btn = st.button(
+        "Fetch Balances",
+        disabled=not bool(covalent_api_key and eth_address),
+    )
+
+def fetch_eth_balances_covalent(api_key: str, address: str):
+    if not api_key or not address:
+        raise ValueError("API key and address are required.")
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+    session = requests.Session()
+    retries = Retry(total=3, backoff_factor=0.8, status_forcelist=[429,500,502,503,504], allowed_methods=["GET"], raise_on_status=False)
+    session.mount("https://", HTTPAdapter(max_retries=retries))
+    url = f"https://api.covalenthq.com/v1/1/address/{address}/balances_v2/"
+    r = session.get(url, params={"key": api_key, "nft":"false", "no-nft-fetch":"true", "quote-currency":"USD"}, timeout=45)
+    r.raise_for_status()
+    items = (r.json().get("data",{}) or {}).get("items",[]) or []
+    rows = []
+    for it in items:
+        try:
+            decimals = it.get("contract_decimals", 0) or 0
+            human = int(it.get("balance","0") or "0") / (10**decimals)
+        except Exception:
+            human = None
+        if human and abs(human) > 0:
+            rows.append({
+                "Token": it.get("contract_ticker_symbol",""),
+                "Name": it.get("contract_name",""),
+                "Amount": human,
+                "USD (quote)": it.get("quote"),
+                "Explorer": f"https://etherscan.io/token/{it.get('contract_address')}?a={address}" if it.get("contract_address") else f"https://etherscan.io/address/{address}",
+            })
+    dfw = pd.DataFrame(rows)
+    if not dfw.empty and "USD (quote)" in dfw.columns:
+        dfw = dfw.sort_values(by=["USD (quote)"], ascending=False, na_position="last")
+    return dfw, f"https://etherscan.io/address/{address}"
+
+if fetch_btn:
+    with st.spinner("Fetching balances…"):
+        try:
+            dfw, addr_link = fetch_eth_balances_covalent(covalent_api_key, eth_address)
+            st.markdown(f"**Address:** [{eth_address}]({addr_link})")
+            if dfw.empty:
+                st.info("No non-zero token balances found.")
+            else:
+                dfw = dfw.copy()
+                dfw["Explorer"] = dfw["Explorer"].apply(lambda u: f"[link]({u})")
+                st.dataframe(dfw, use_container_width=True)
+        except Exception as e:
+            st.error("Couldn’t fetch balances.")
+            st.exception(e)
 
 # -------------------- Company Screener --------------------------
 
