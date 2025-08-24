@@ -368,34 +368,40 @@ LIABILITIES = {
     for c in companies
 }
 
-# -------------------- Live Prices -----------------------
+# -------------------- Day 1: Live Prices -----------------------
 
-# Fetch live BTC and ETH prices from CoinGecko.  We intentionally omit USD Coin (USDC)
-# and return no decimals for display.  This section appears before the wallet settings.
 st.subheader("Live Prices (USD)")
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_prices():
-    """Retrieve current Bitcoin and Ethereum prices in USD from the CoinGecko API."""
+    """
+    Fetch current Bitcoin and Ethereum prices in USD from CoinGecko.
+
+    Returns
+    -------
+    dict
+        A dictionary with keys 'BTC' and 'ETH' and their corresponding prices in USD.
+    """
     url = "https://api.coingecko.com/api/v3/simple/price"
-    # Only request bitcoin and ethereum; omit usd-coin to avoid unnecessary API fields
+    # Only request Bitcoin and Ethereum; exclude USDC
     params = {"ids": "bitcoin,ethereum", "vs_currencies": "usd"}
     r = requests.get(url, params=params, timeout=15)
     r.raise_for_status()
-    data = r.json()
+    data = r.json() or {}
     return {
-        "BTC": data.get("bitcoin", {}).get("usd"),
-        "ETH": data.get("ethereum", {}).get("usd"),
+        "BTC": (data.get("bitcoin") or {}).get("usd"),
+        "ETH": (data.get("ethereum") or {}).get("usd"),
     }
 
 try:
     prices = fetch_prices() or {}
-    # Display BTC and ETH prices with thousands separators and no decimals
-    cols_prices = st.columns(2)
+    # Use two columns: one for BTC and one for ETH
+    cols = st.columns(2)
     btc_val = prices.get("BTC")
     eth_val = prices.get("ETH")
-    cols_prices[0].metric("BTC", f"${btc_val:,.0f}" if btc_val is not None else "–")
-    cols_prices[1].metric("ETH", f"${eth_val:,.0f}" if eth_val is not None else "–")
+    # Display metrics without decimal places (round to nearest whole dollar)
+    cols[0].metric("BTC", f"${btc_val:,.0f}" if btc_val is not None else "–")
+    cols[1].metric("ETH", f"${eth_val:,.0f}" if eth_val is not None else "–")
     # Show a green dot to indicate fresh data
     green_dot = "<span style='color:green'>&#9679;</span>"
     st.caption(
@@ -404,11 +410,6 @@ try:
         unsafe_allow_html=True,
     )
 except Exception as e:
-    # In case of failure, show dashes for unavailable prices and use zero values
-    cols_prices = st.columns(2)
-    cols_prices[0].metric("BTC", "–")
-    cols_prices[1].metric("ETH", "–")
-    # fallback default for downstream computations
     prices = {"BTC": 0.0, "ETH": 0.0}
     st.error("Couldn't load prices.")
     st.exception(e)
@@ -584,6 +585,39 @@ def compute_row(c: dict, prices: dict) -> dict:
         "MNAV (x)": mnav,
     }
 
+# ------------------------------------------------------------------
+# Company selector helper
+def render_company_selector(df_reference: pd.DataFrame) -> list:
+    """
+    Render a set of checkboxes for each ticker in the provided DataFrame
+    and return a list of selected tickers.  The checkboxes are keyed by
+    ticker symbol to persist state across reruns and across different
+    analysis views.  A header is displayed above the list to clarify
+    the purpose of the selector.
+
+    Parameters
+    ----------
+    df_reference : pd.DataFrame
+        A DataFrame containing a 'Ticker' column.
+
+    Returns
+    -------
+    list
+        A list of ticker strings that were checked by the user.
+    """
+    # If there is no 'Ticker' column, return an empty selection
+    if "Ticker" not in df_reference.columns:
+        return []
+    tickers = sorted(df_reference["Ticker"].dropna().unique())
+    selected: list[str] = []
+    # Provide a small heading for the selector
+    st.markdown("**Select companies**")
+    for t in tickers:
+        # Unique key per ticker so Streamlit remembers state across reruns
+        if st.checkbox(t, value=True, key=f"company_select_{t}"):
+            selected.append(t)
+    return selected
+
 # Build enriched companies & numeric DataFrame once
 enriched = [with_live_fields(c) for c in companies]
 rows = [compute_row(c, prices) for c in enriched]
@@ -632,59 +666,71 @@ elif analysis_key == "treasury":
     st.subheader("Top 10 by Treasury (USD)")
     st.caption("Companies with the largest crypto treasury holdings")
 
-    data_top = df_view[["Ticker", "name", "Treasury USD"]].dropna()
-    if data_top.empty:
-        st.info("No rows available for ranking.")
-        st.stop()
+    # Create a two-column layout: chart on the left, selector on the right
+    graph_col, select_col = st.columns([4, 1])
 
-    # Top-10 by Treasury
-    _top = data_top.sort_values("Treasury USD", ascending=False).head(10).copy()
+    # Render the company selector in the right column
+    with select_col:
+        selected_tickers = render_company_selector(df_view)
 
-    if HAS_PLOTLY:
-        df_plot = _top.copy()
-        df_plot["value_str"] = df_plot["Treasury USD"].apply(_format_number_no_currency)
-
-        max_val_top = df_plot["Treasury USD"].max() if not df_plot["Treasury USD"].empty else 0
-        if max_val_top and max_val_top > 0:
-            tickvals_top = np.linspace(0, max_val_top, 5)
-            ticktext_top = [_format_number_no_currency(v) for v in tickvals_top]
-        else:
-            tickvals_top = [0]
-            ticktext_top = ["0"]
-
-        fig_top = px.bar(
-            df_plot,
-            x="Ticker",
-            y="Treasury USD",
-            text="value_str",
-            hover_data=["name"],
-            title=None,
-        )
-        fig_top.update_yaxes(
-            title="Treasury (USD)",
-            type="linear",
-            tickmode="array",
-            tickvals=tickvals_top,
-            ticktext=ticktext_top,
-        )
-        fig_top.update_traces(
-            texttemplate="%{text}",
-            hovertemplate="<b>%{x}</b><br>Treasury: %{text}<extra></extra>",
-        )
-        st.plotly_chart(fig_top, use_container_width=True)
+    # Filter df_view for the selected companies (if any)
+    if selected_tickers:
+        df_view_local = df_view[df_view["Ticker"].isin(selected_tickers)]
     else:
-        chart_top = (
-            alt.Chart(_top)
-            .mark_bar()
-            .encode(
-                x="Ticker:N",
-                y=alt.Y("Treasury USD:Q", title="Treasury (USD)", scale=alt.Scale(type="linear")),
-                tooltip=["Ticker", "name", "Treasury USD"],
-            )
-            .properties(title=None)
-        )
-        st.altair_chart(chart_top, use_container_width=True)
+        df_view_local = df_view
 
+    # Extract treasury data for the local view
+    data_top = df_view_local[["Ticker", "name", "Treasury USD"]].dropna()
+    if data_top.empty:
+        graph_col.info("No rows available for ranking.")
+    else:
+        # Determine the top 10 companies by treasury value among selected companies
+        _top = data_top.sort_values("Treasury USD", ascending=False).head(10).copy()
+        if _top.empty:
+            graph_col.info("No rows available for ranking after filtering.")
+        else:
+            if HAS_PLOTLY:
+                df_plot = _top.copy()
+                df_plot["value_str"] = df_plot["Treasury USD"].apply(_format_number_no_currency)
+                max_val_top = df_plot["Treasury USD"].max() if not df_plot["Treasury USD"].empty else 0
+                if max_val_top and max_val_top > 0:
+                    tickvals_top = np.linspace(0, max_val_top, 5)
+                    ticktext_top = [_format_number_no_currency(v) for v in tickvals_top]
+                else:
+                    tickvals_top = [0]
+                    ticktext_top = ["0"]
+                fig_top = px.bar(
+                    df_plot,
+                    x="Ticker",
+                    y="Treasury USD",
+                    text="value_str",
+                    hover_data=["name"],
+                    title=None,
+                )
+                fig_top.update_yaxes(
+                    title="Treasury (USD)",
+                    type="linear",
+                    tickmode="array",
+                    tickvals=tickvals_top,
+                    ticktext=ticktext_top,
+                )
+                fig_top.update_traces(
+                    texttemplate="%{text}",
+                    hovertemplate="<b>%{x}</b><br>Treasury: %{text}<extra></extra>",
+                )
+                graph_col.plotly_chart(fig_top, use_container_width=True)
+            else:
+                chart_top = (
+                    alt.Chart(_top)
+                    .mark_bar()
+                    .encode(
+                        x="Ticker:N",
+                        y=alt.Y("Treasury USD:Q", title="Treasury (USD)", scale=alt.Scale(type="linear")),
+                        tooltip=["Ticker", "name", "Treasury USD"],
+                    )
+                    .properties(title=None)
+                )
+                graph_col.altair_chart(chart_top, use_container_width=True)
     st.stop()
 
 
@@ -692,122 +738,147 @@ elif analysis_key == "market_vs_treasury":
     st.subheader("Treasury % of Market Cap vs Market Cap")
     st.caption("Relationship between market cap and the share of crypto treasury")
 
+    # Base scatter data from the filtered view
     _sc = df_view[["Ticker", "name", "Treasury USD", "Mkt Cap (USD)", "% of Mkt Cap"]].dropna()
     if _sc.empty:
         st.info("Not enough data for scatter.")
         st.stop()
 
+    # Convert percentage into fractional format for y-axis
     _sc = _sc.assign(pct=_sc["% of Mkt Cap"] / 100.0)
 
-    if HAS_PLOTLY:
-        max_val_sc = _sc["Mkt Cap (USD)"].max() if not _sc["Mkt Cap (USD)"].empty else 0
-        if max_val_sc and max_val_sc > 0:
-            tickvals_sc = np.linspace(0, max_val_sc, 5)
-            ticktext_sc = [f"{v/1e9:.2f}B" for v in tickvals_sc]
-        else:
-            tickvals_sc = [0]
-            ticktext_sc = ["0B"]
+    # Layout: chart on the left, selector on the right
+    graph_col, select_col = st.columns([4, 1])
 
-        fig_sc = px.scatter(
-            _sc,
-            x="Mkt Cap (USD)",
-            y="pct",
-            size="Treasury USD",
-            hover_data=["Ticker", "name"],
-            title=None,
-            labels={"pct": "% of Market Cap"},
-        )
-        fig_sc.update_xaxes(
-            title="Market Cap (B USD)",
-            type="linear",
-            tickmode="array",
-            tickvals=tickvals_sc,
-            ticktext=ticktext_sc,
-        )
-        fig_sc.update_yaxes(title="% of Market Cap", tickformat=".2%")
-        fig_sc.update_layout(legend=dict(orientation="v", y=1, x=1.02))
-        st.plotly_chart(fig_sc, use_container_width=True)
+    # Company selector in the right column
+    with select_col:
+        selected_tickers = render_company_selector(df_view)
+
+    # Filter scatter data based on user selection
+    if selected_tickers:
+        _sc_filtered = _sc[_sc["Ticker"].isin(selected_tickers)]
     else:
-        chart_sc = (
-            alt.Chart(_sc)
-            .mark_circle()
-            .encode(
-                x=alt.X("Mkt Cap (USD):Q", title="Market Cap (USD)", scale=alt.Scale(type="linear")),
-                y=alt.Y("pct:Q", title="% of Market Cap"),
-                size="Treasury USD:Q",
-                tooltip=["Ticker", "name", "Treasury USD", "Mkt Cap (USD)", "% of Mkt Cap"],
-            )
-            .properties(title=None)
-        )
-        st.altair_chart(chart_sc, use_container_width=True)
+        _sc_filtered = _sc
 
+    if _sc_filtered.empty:
+        graph_col.info("Not enough data for scatter after filtering.")
+    else:
+        if HAS_PLOTLY:
+            max_val_sc = _sc_filtered["Mkt Cap (USD)"].max() if not _sc_filtered["Mkt Cap (USD)"].empty else 0
+            if max_val_sc and max_val_sc > 0:
+                tickvals_sc = np.linspace(0, max_val_sc, 5)
+                ticktext_sc = [f"{v/1e9:.2f}B" for v in tickvals_sc]
+            else:
+                tickvals_sc = [0]
+                ticktext_sc = ["0B"]
+            fig_sc = px.scatter(
+                _sc_filtered,
+                x="Mkt Cap (USD)",
+                y="pct",
+                size="Treasury USD",
+                hover_data=["Ticker", "name"],
+                title=None,
+                labels={"pct": "% of Market Cap"},
+            )
+            fig_sc.update_xaxes(
+                title="Market Cap (B USD)",
+                type="linear",
+                tickmode="array",
+                tickvals=tickvals_sc,
+                ticktext=ticktext_sc,
+            )
+            fig_sc.update_yaxes(title="% of Market Cap", tickformat=".2%")
+            fig_sc.update_layout(legend=dict(orientation="v", y=1, x=1.02))
+            graph_col.plotly_chart(fig_sc, use_container_width=True)
+        else:
+            chart_sc = (
+                alt.Chart(_sc_filtered)
+                .mark_circle()
+                .encode(
+                    x=alt.X("Mkt Cap (USD):Q", title="Market Cap (USD)", scale=alt.Scale(type="linear")),
+                    y=alt.Y("pct:Q", title="% of Market Cap"),
+                    size="Treasury USD:Q",
+                    tooltip=["Ticker", "name", "Treasury USD", "Mkt Cap (USD)", "% of Mkt Cap"],
+                )
+                .properties(title=None)
+            )
+            graph_col.altair_chart(chart_sc, use_container_width=True)
     st.stop()
 
 elif analysis_key == "valuation":
     st.subheader("Liabilities vs Net Crypto NAV")
     st.caption("Compare total liabilities against net crypto NAV across companies")
 
+    # Layout: chart on the left, company selector on the right
+    graph_col, select_col = st.columns([4, 1])
+
+    # Company selector in the right column
+    with select_col:
+        selected_tickers = render_company_selector(df_view)
+
+    # Base data for liabilities vs NAV
     liab_nav_df = df_view[["Ticker", "Total Liabilities", "Net Crypto NAV"]].dropna()
+    if selected_tickers:
+        liab_nav_df = liab_nav_df[liab_nav_df["Ticker"].isin(selected_tickers)]
     if liab_nav_df.empty:
-        st.info("No data for liabilities vs Net Crypto NAV chart.")
-        st.stop()
-
-    liab_nav_df_sorted = liab_nav_df.sort_values("Net Crypto NAV", ascending=False)
-    liab_nav_long = liab_nav_df_sorted.melt(
-        id_vars=["Ticker"],
-        value_vars=["Total Liabilities", "Net Crypto NAV"],
-        var_name="Metric",
-        value_name="Amount",
-    )
-
-    if HAS_PLOTLY:
-        liab_nav_long = liab_nav_long.copy()
-        liab_nav_long["Amount_B"] = liab_nav_long["Amount"] / 1e9
-
-        max_val_ln = liab_nav_long["Amount"].max() if not liab_nav_long["Amount"].empty else 0
-        if max_val_ln and max_val_ln > 0:
-            tickvals_ln = np.linspace(0, max_val_ln, 5)
-            ticktext_ln = [f"{v/1e9:.2f}B" for v in tickvals_ln]
-        else:
-            tickvals_ln = [0]
-            ticktext_ln = ["0B"]
-
-        fig_ln = px.bar(
-            liab_nav_long,
-            x="Ticker",
-            y="Amount",
-            color="Metric",
-            barmode="group",
-            text="Amount_B",
-            title=None,
-        )
-        fig_ln.update_yaxes(
-            title="Amount (B USD)",
-            type="linear",
-            tickmode="array",
-            tickvals=tickvals_ln,
-            ticktext=ticktext_ln,
-        )
-        fig_ln.update_traces(
-            texttemplate="%{text:.2f}B",
-            hovertemplate="<b>%{x}</b><br>%{fullData.name}: %{text:.2f}B<extra></extra>",
-        )
-        fig_ln.update_layout(legend=dict(orientation="v", y=1, x=1.02))
-        st.plotly_chart(fig_ln, use_container_width=True)
+        graph_col.info("No data for liabilities vs Net Crypto NAV chart.")
     else:
-        ln_chart = (
-            alt.Chart(liab_nav_long)
-            .mark_bar()
-            .encode(
-                x="Ticker:N",
-                y=alt.Y("Amount:Q", title="Amount (USD)", scale=alt.Scale(type="linear")),
-                color="Metric:N",
-                tooltip=["Ticker", "Metric", "Amount"],
-            )
-            .properties(title=None)
+        # Sort by Net Crypto NAV descending for clearer ordering
+        liab_nav_df_sorted = liab_nav_df.sort_values("Net Crypto NAV", ascending=False)
+        liab_nav_long = liab_nav_df_sorted.melt(
+            id_vars=["Ticker"],
+            value_vars=["Total Liabilities", "Net Crypto NAV"],
+            var_name="Metric",
+            value_name="Amount",
         )
-        st.altair_chart(ln_chart, use_container_width=True)
-
+        if liab_nav_long.empty:
+            graph_col.info("No data for liabilities vs Net Crypto NAV chart after filtering.")
+        else:
+            if HAS_PLOTLY:
+                liab_nav_long = liab_nav_long.copy()
+                liab_nav_long["Amount_B"] = liab_nav_long["Amount"] / 1e9
+                max_val_ln = liab_nav_long["Amount"].max() if not liab_nav_long["Amount"].empty else 0
+                if max_val_ln and max_val_ln > 0:
+                    tickvals_ln = np.linspace(0, max_val_ln, 5)
+                    ticktext_ln = [f"{v/1e9:.2f}B" for v in tickvals_ln]
+                else:
+                    tickvals_ln = [0]
+                    ticktext_ln = ["0B"]
+                fig_ln = px.bar(
+                    liab_nav_long,
+                    x="Ticker",
+                    y="Amount",
+                    color="Metric",
+                    barmode="group",
+                    text="Amount_B",
+                    title=None,
+                )
+                fig_ln.update_yaxes(
+                    title="Amount (B USD)",
+                    type="linear",
+                    tickmode="array",
+                    tickvals=tickvals_ln,
+                    ticktext=ticktext_ln,
+                )
+                fig_ln.update_traces(
+                    texttemplate="%{text:.2f}B",
+                    hovertemplate="<b>%{x}</b><br>%{fullData.name}: %{text:.2f}B<extra></extra>",
+                )
+                fig_ln.update_layout(legend=dict(orientation="v", y=1, x=1.02))
+                graph_col.plotly_chart(fig_ln, use_container_width=True)
+            else:
+                ln_chart = (
+                    alt.Chart(liab_nav_long)
+                    .mark_bar()
+                    .encode(
+                        x="Ticker:N",
+                        y=alt.Y("Amount:Q", title="Amount (USD)", scale=alt.Scale(type="linear")),
+                        color="Metric:N",
+                        tooltip=["Ticker", "Metric", "Amount"],
+                    )
+                    .properties(title=None)
+                )
+                graph_col.altair_chart(ln_chart, use_container_width=True)
     st.stop()
 
 
