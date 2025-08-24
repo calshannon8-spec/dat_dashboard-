@@ -21,7 +21,7 @@ except Exception:
     import altair as alt  # Streamlit ships with Altair
 
 APP_DIR = Path(__file__).parent.resolve()
-st.set_page_config(page_title="Selma Ray hello", page_icon="🟠")
+st.set_page_config(page_title="Digital Asset Treasury Dashboard", page_icon="🟠")
 
 # ------------------------------------------------------------------
 # Intro / Glossary
@@ -62,21 +62,81 @@ selected_analysis_label = st.selectbox(
 )
 analysis_key = analysis_options[selected_analysis_label]
 
- if analysis_key == "overview":
-        # compute and display total treasury, liabilities, etc.
-        # ...
- elif analysis_key == "treasury":
-        # render Top 10 by Treasury bar chart
-        # ...
- elif analysis_key == "market_vs_treasury":
-        # render Market Cap vs Treasury scatter plot
-        # ...
-elif analysis_key == "valuation":
-        # render Liabilities vs Net Crypto NAV bar chart
-        # ...
- elif analysis_key == "table":
-      # render the screener table
-        # ...
+# ------------------------------------------------------------------
+# Live price fetching and display
+# Returns current BTC and ETH prices and their 24‑hour percentage change.
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_prices() -> tuple[dict, dict]:
+    """
+    Fetch current Bitcoin and Ethereum prices in USD and their 24‑hour percentage changes.
+
+    Returns:
+        A tuple of two dictionaries:
+        - prices: {"BTC": float|None, "ETH": float|None}
+        - pct_change: {"BTC": float|None, "ETH": float|None}
+    If the API call fails, returns None values.
+    """
+    url = "https://api.coingecko.com/api/v3/simple/price"
+    params = {
+        "ids": "bitcoin,ethereum",
+        "vs_currencies": "usd",
+        "include_24hr_change": "true",
+    }
+    try:
+        r = requests.get(url, params=params, timeout=15)
+        r.raise_for_status()
+        data = r.json() or {}
+        btc_data = data.get("bitcoin", {}) or {}
+        eth_data = data.get("ethereum", {}) or {}
+        prices = {
+            "BTC": btc_data.get("usd"),
+            "ETH": eth_data.get("usd"),
+        }
+        pct_change = {
+            "BTC": btc_data.get("usd_24h_change"),
+            "ETH": eth_data.get("usd_24h_change"),
+        }
+        return prices, pct_change
+    except Exception:
+        return ({"BTC": None, "ETH": None}, {"BTC": None, "ETH": None})
+
+def render_live_prices(prices: dict, pct_change: dict) -> None:
+    """
+    Render a two‑column display of BTC and ETH prices with their 24‑hour percentage change.
+    Prices are displayed without decimals and percent changes are shown below the values.
+    """
+    st.markdown("### Live Prices (USD)")
+    col1, col2 = st.columns(2)
+    btc_price = prices.get("BTC")
+    eth_price = prices.get("ETH")
+    btc_delta = pct_change.get("BTC")
+    eth_delta = pct_change.get("ETH")
+    # Format prices without decimals; handle None gracefully
+    btc_str = f"${btc_price:,.0f}" if btc_price is not None else "–"
+    eth_str = f"${eth_price:,.0f}" if eth_price is not None else "–"
+    # Format delta with sign and two decimals; if None, use None to hide delta
+    btc_delta_str = f"{btc_delta:+.2f}%" if btc_delta is not None else None
+    eth_delta_str = f"{eth_delta:+.2f}%" if eth_delta is not None else None
+    col1.metric("Bitcoin (BTC)", btc_str, delta=btc_delta_str)
+    col2.metric("Ethereum (ETH)", eth_str, delta=eth_delta_str)
+    st.caption("24h change displayed under each price.")
+
+# ------------------------------------------------------------------
+# Company selector for charts
+def render_company_selector(df_in: pd.DataFrame) -> list[str]:
+    """
+    Render a list of checkboxes for each ticker in the provided DataFrame.
+    Returns a list of tickers that are selected.
+    """
+    st.markdown("##### Select Companies")
+    selected: list[str] = []
+    # Sort tickers alphabetically to ensure stable ordering
+    for t in sorted(df_in["Ticker"].dropna().unique()):
+        # Each checkbox needs a unique key to persist state across reruns
+        if st.checkbox(t, value=True, key=f"selector_{t}"):
+            selected.append(t)
+    return selected
+# Note: conditional rendering based on analysis_key is implemented later in the script.
 
 
 
@@ -493,6 +553,14 @@ def compute_row(c: dict, prices: dict) -> dict:
     }
 
 # Build enriched companies & numeric DataFrame once
+# Fetch live crypto prices and 24h changes for BTC and ETH. These values will be used
+# when computing USD treasury values in compute_row.
+try:
+    prices, pct_change = fetch_prices()
+except Exception:
+    # fall back to zero values on error
+    prices, pct_change = ({"BTC": 0.0, "ETH": 0.0}, {"BTC": 0.0, "ETH": 0.0})
+
 enriched = [with_live_fields(c) for c in companies]
 rows = [compute_row(c, prices) for c in enriched]
 df = pd.DataFrame(rows)
@@ -534,18 +602,29 @@ if analysis_key == "overview":
     c2.metric("Total Liabilities", fmt_abbrev(total_liabilities), help="Sum of reported liabilities for the filtered companies")
     c3.metric("Average MNAV", f"{avg_mnav_value:.2f}x" if pd.notnull(avg_mnav_value) else "–", help="Mean of MNAV (market cap / net asset value)")
     st.caption(f"Filtered rows: {len(df_view)} / {len(df)}")
+    # Display live crypto prices with 24‑hour percentage change beneath the overview metrics
+    render_live_prices(prices, pct_change)
     st.stop()
 
 elif analysis_key == "treasury":
     st.subheader("Top 10 by Treasury (USD)")
     st.caption("Companies with the largest crypto treasury holdings")
+    # Create a two‑column layout: left for the chart, right for the company selector
+    graph_col, select_col = st.columns([4, 1])
+    with select_col:
+        selected_tickers = render_company_selector(df_view)
 
-    data_top = df_view[["Ticker", "name", "Treasury USD"]].dropna()
+    # Filter the DataFrame based on selected tickers (if any)
+    df_view_local = df_view[df_view["Ticker"].isin(selected_tickers)] if selected_tickers else df_view
+
+    data_top = df_view_local[["Ticker", "name", "Treasury USD"]].dropna()
     if data_top.empty:
-        st.info("No rows available for ranking.")
+        graph_col.info("No rows available for ranking.")
+        # Still display live prices even if no data
+        render_live_prices(prices, pct_change)
         st.stop()
 
-    # Top-10 by Treasury
+    # Top‑10 by Treasury
     _top = data_top.sort_values("Treasury USD", ascending=False).head(10).copy()
 
     if HAS_PLOTLY:
@@ -579,7 +658,7 @@ elif analysis_key == "treasury":
             texttemplate="%{text}",
             hovertemplate="<b>%{x}</b><br>Treasury: %{text}<extra></extra>",
         )
-        st.plotly_chart(fig_top, use_container_width=True)
+        graph_col.plotly_chart(fig_top, use_container_width=True)
     else:
         chart_top = (
             alt.Chart(_top)
@@ -591,18 +670,26 @@ elif analysis_key == "treasury":
             )
             .properties(title=None)
         )
-        st.altair_chart(chart_top, use_container_width=True)
+        graph_col.altair_chart(chart_top, use_container_width=True)
 
+    # Display live prices beneath the chart and selector
+    render_live_prices(prices, pct_change)
     st.stop()
 
 
 elif analysis_key == "market_vs_treasury":
     st.subheader("Treasury % of Market Cap vs Market Cap")
     st.caption("Relationship between market cap and the share of crypto treasury")
+    # Create a two‑column layout: chart and selector
+    graph_col, select_col = st.columns([4, 1])
+    with select_col:
+        selected_tickers = render_company_selector(df_view)
 
-    _sc = df_view[["Ticker", "name", "Treasury USD", "Mkt Cap (USD)", "% of Mkt Cap"]].dropna()
+    df_view_local = df_view[df_view["Ticker"].isin(selected_tickers)] if selected_tickers else df_view
+    _sc = df_view_local[["Ticker", "name", "Treasury USD", "Mkt Cap (USD)", "% of Mkt Cap"]].dropna()
     if _sc.empty:
-        st.info("Not enough data for scatter.")
+        graph_col.info("Not enough data for scatter.")
+        render_live_prices(prices, pct_change)
         st.stop()
 
     _sc = _sc.assign(pct=_sc["% of Mkt Cap"] / 100.0)
@@ -634,7 +721,7 @@ elif analysis_key == "market_vs_treasury":
         )
         fig_sc.update_yaxes(title="% of Market Cap", tickformat=".2%")
         fig_sc.update_layout(legend=dict(orientation="v", y=1, x=1.02))
-        st.plotly_chart(fig_sc, use_container_width=True)
+        graph_col.plotly_chart(fig_sc, use_container_width=True)
     else:
         chart_sc = (
             alt.Chart(_sc)
@@ -647,17 +734,24 @@ elif analysis_key == "market_vs_treasury":
             )
             .properties(title=None)
         )
-        st.altair_chart(chart_sc, use_container_width=True)
+        graph_col.altair_chart(chart_sc, use_container_width=True)
 
+    render_live_prices(prices, pct_change)
     st.stop()
 
 elif analysis_key == "valuation":
     st.subheader("Liabilities vs Net Crypto NAV")
     st.caption("Compare total liabilities against net crypto NAV across companies")
+    # Two‑column layout: chart and selector
+    graph_col, select_col = st.columns([4, 1])
+    with select_col:
+        selected_tickers = render_company_selector(df_view)
 
-    liab_nav_df = df_view[["Ticker", "Total Liabilities", "Net Crypto NAV"]].dropna()
+    df_view_local = df_view[df_view["Ticker"].isin(selected_tickers)] if selected_tickers else df_view
+    liab_nav_df = df_view_local[["Ticker", "Total Liabilities", "Net Crypto NAV"]].dropna()
     if liab_nav_df.empty:
-        st.info("No data for liabilities vs Net Crypto NAV chart.")
+        graph_col.info("No data for liabilities vs Net Crypto NAV chart.")
+        render_live_prices(prices, pct_change)
         st.stop()
 
     liab_nav_df_sorted = liab_nav_df.sort_values("Net Crypto NAV", ascending=False)
@@ -701,7 +795,7 @@ elif analysis_key == "valuation":
             hovertemplate="<b>%{x}</b><br>%{fullData.name}: %{text:.2f}B<extra></extra>",
         )
         fig_ln.update_layout(legend=dict(orientation="v", y=1, x=1.02))
-        st.plotly_chart(fig_ln, use_container_width=True)
+        graph_col.plotly_chart(fig_ln, use_container_width=True)
     else:
         ln_chart = (
             alt.Chart(liab_nav_long)
@@ -714,15 +808,21 @@ elif analysis_key == "valuation":
             )
             .properties(title=None)
         )
-        st.altair_chart(ln_chart, use_container_width=True)
+        graph_col.altair_chart(ln_chart, use_container_width=True)
 
+    render_live_prices(prices, pct_change)
     st.stop()
 
 
 elif analysis_key == "table":
     st.subheader("Company Screener Table")
+    # Two‑column layout: data table and selector
+    table_col, select_col = st.columns([4, 1])
+    with select_col:
+        selected_tickers = render_company_selector(df_view)
 
-    df_display = df_view.copy()
+    df_view_local = df_view[df_view["Ticker"].isin(selected_tickers)] if selected_tickers else df_view
+    df_display = df_view_local.copy()
     for col in ["Mkt Cap (USD)", "Treasury USD", "Total Liabilities", "Net Crypto NAV"]:
         if col in df_display.columns:
             df_display[col] = df_display[col].apply(fmt_abbrev)
@@ -742,7 +842,8 @@ elif analysis_key == "table":
             lambda x: f"{x:.2f}x" if pd.notnull(x) else "–"
         )
 
-    st.dataframe(df_display, use_container_width=True)
+    table_col.dataframe(df_display, use_container_width=True)
+    render_live_prices(prices, pct_change)
     st.stop()
 
 
