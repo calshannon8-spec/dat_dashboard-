@@ -62,8 +62,21 @@ selected_analysis_label = st.selectbox(
 )
 analysis_key = analysis_options[selected_analysis_label]
 
-# Note: conditional rendering based on `analysis_key` is defined
-# later in the script, after the DataFrame and filters are prepared.
+ if analysis_key == "overview":
+        # compute and display total treasury, liabilities, etc.
+        # ...
+ elif analysis_key == "treasury":
+        # render Top 10 by Treasury bar chart
+        # ...
+ elif analysis_key == "market_vs_treasury":
+        # render Market Cap vs Treasury scatter plot
+        # ...
+elif analysis_key == "valuation":
+        # render Liabilities vs Net Crypto NAV bar chart
+        # ...
+ elif analysis_key == "table":
+      # render the screener table
+        # ...
 
 
 
@@ -368,119 +381,7 @@ LIABILITIES = {
     for c in companies
 }
 
-# -------------------- Day 1: Live Prices -----------------------
 
-st.subheader("Live Prices (USD)")
-@st.cache_data(ttl=60, show_spinner=False)
-def fetch_prices():
-    url = "https://api.coingecko.com/api/v3/simple/price"
-    params = {"ids": "bitcoin,ethereum,usd-coin", "vs_currencies": "usd"}
-    r = requests.get(url, params=params, timeout=15)
-    r.raise_for_status()
-    data = r.json()
-    return {"BTC": data["bitcoin"]["usd"], "ETH": data["ethereum"]["usd"], "USDC": data["usd-coin"]["usd"]}
-
-# Helper to render live crypto prices below each chart section.
-def render_live_prices():
-    """Display live crypto prices (BTC, ETH, USDC) as metrics with last update timestamp."""
-    # Label for the live prices section
-    st.markdown("#### Live Crypto Prices (USD)")
-    try:
-        prices = fetch_prices()
-    except Exception:
-        st.error("Error fetching crypto prices.")
-        return
-    # Create three columns for BTC, ETH, and USDC
-    col_btc, col_eth, col_usdc = st.columns(3)
-    btc_val = prices.get("BTC")
-    eth_val = prices.get("ETH")
-    usdc_val = prices.get("USDC")
-    # Format and display metrics. Delta omitted since we do not track changes over time.
-    col_btc.metric("Bitcoin (BTC)", f"${btc_val:,.2f}" if btc_val is not None else "–")
-    col_eth.metric("Ethereum (ETH)", f"${eth_val:,.2f}" if eth_val is not None else "–")
-    col_usdc.metric("USD Coin (USDC)", f"${usdc_val:,.2f}" if usdc_val is not None else "–")
-    # Caption with the current timestamp for update time
-    st.caption(f"Prices updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-try:
-    prices = fetch_prices()
-    c = st.columns(3)
-    c[0].metric("BTC", f"${prices['BTC']:,}")
-    c[1].metric("ETH", f"${prices['ETH']:,}")
-    c[2].metric("USDC", f"${prices['USDC']:,}")
-    # Show a green dot to indicate fresh data
-    green_dot = "<span style='color:green'>&#9679;</span>"
-    st.caption(
-        f"{green_dot} Last updated: "
-        + datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S %Z"),
-        unsafe_allow_html=True,
-    )
-except Exception as e:
-    prices = {"BTC": 0.0, "ETH": 0.0, "USDC": 0.0}
-    st.error("Couldn't load prices.")
-    st.exception(e)
-
-st.divider()
-# Wallet balances section is collapsible to reduce clutter
-with st.sidebar.expander("API / Wallet Settings", expanded=False):
-    st.subheader("Wallet Settings")
-    covalent_api_key = st.text_input("Covalent API Key", type="password")
-    eth_address = st.text_input(
-        "ETH Address (0x...)",
-        placeholder="e.g., 0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
-    )
-    # Only allow fetching balances when both API key and address are provided
-    fetch_btn = st.button(
-        "Fetch Balances",
-        disabled=not bool(covalent_api_key and eth_address),
-    )
-
-def fetch_eth_balances_covalent(api_key: str, address: str):
-    if not api_key or not address:
-        raise ValueError("API key and address are required.")
-    from requests.adapters import HTTPAdapter
-    from urllib3.util.retry import Retry
-    session = requests.Session()
-    retries = Retry(total=3, backoff_factor=0.8, status_forcelist=[429,500,502,503,504], allowed_methods=["GET"], raise_on_status=False)
-    session.mount("https://", HTTPAdapter(max_retries=retries))
-    url = f"https://api.covalenthq.com/v1/1/address/{address}/balances_v2/"
-    r = session.get(url, params={"key": api_key, "nft":"false", "no-nft-fetch":"true", "quote-currency":"USD"}, timeout=45)
-    r.raise_for_status()
-    items = (r.json().get("data",{}) or {}).get("items",[]) or []
-    rows = []
-    for it in items:
-        try:
-            decimals = it.get("contract_decimals", 0) or 0
-            human = int(it.get("balance","0") or "0") / (10**decimals)
-        except Exception:
-            human = None
-        if human and abs(human) > 0:
-            rows.append({
-                "Token": it.get("contract_ticker_symbol",""),
-                "Name": it.get("contract_name",""),
-                "Amount": human,
-                "USD (quote)": it.get("quote"),
-                "Explorer": f"https://etherscan.io/token/{it.get('contract_address')}?a={address}" if it.get("contract_address") else f"https://etherscan.io/address/{address}",
-            })
-    dfw = pd.DataFrame(rows)
-    if not dfw.empty and "USD (quote)" in dfw.columns:
-        dfw = dfw.sort_values(by=["USD (quote)"], ascending=False, na_position="last")
-    return dfw, f"https://etherscan.io/address/{address}"
-
-if fetch_btn:
-    with st.spinner("Fetching balances…"):
-        try:
-            dfw, addr_link = fetch_eth_balances_covalent(covalent_api_key, eth_address)
-            st.markdown(f"**Address:** [{eth_address}]({addr_link})")
-            if dfw.empty:
-                st.info("No non-zero token balances found.")
-            else:
-                dfw = dfw.copy()
-                dfw["Explorer"] = dfw["Explorer"].apply(lambda u: f"[link]({u})")
-                st.dataframe(dfw, use_container_width=True)
-        except Exception as e:
-            st.error("Couldn’t fetch balances.")
-            st.exception(e)
 
 # -------------------- Company Screener --------------------------
 
@@ -633,8 +534,6 @@ if analysis_key == "overview":
     c2.metric("Total Liabilities", fmt_abbrev(total_liabilities), help="Sum of reported liabilities for the filtered companies")
     c3.metric("Average MNAV", f"{avg_mnav_value:.2f}x" if pd.notnull(avg_mnav_value) else "–", help="Mean of MNAV (market cap / net asset value)")
     st.caption(f"Filtered rows: {len(df_view)} / {len(df)}")
-    # Render live crypto prices below the overview metrics
-    render_live_prices()
     st.stop()
 
 elif analysis_key == "treasury":
@@ -694,8 +593,6 @@ elif analysis_key == "treasury":
         )
         st.altair_chart(chart_top, use_container_width=True)
 
-    # After showing the Top 10 chart, display live crypto prices
-    render_live_prices()
     st.stop()
 
 
@@ -752,8 +649,6 @@ elif analysis_key == "market_vs_treasury":
         )
         st.altair_chart(chart_sc, use_container_width=True)
 
-    # After showing the scatter chart, display live crypto prices
-    render_live_prices()
     st.stop()
 
 elif analysis_key == "valuation":
@@ -821,8 +716,6 @@ elif analysis_key == "valuation":
         )
         st.altair_chart(ln_chart, use_container_width=True)
 
-    # After showing the liabilities vs net crypto NAV chart, display live crypto prices
-    render_live_prices()
     st.stop()
 
 
@@ -850,8 +743,6 @@ elif analysis_key == "table":
         )
 
     st.dataframe(df_display, use_container_width=True)
-    # Display live crypto prices below the screener table
-    render_live_prices()
     st.stop()
 
 
