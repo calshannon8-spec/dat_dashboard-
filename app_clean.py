@@ -569,8 +569,9 @@ df = df.sort_values(by="% of Mkt Cap", ascending=False).reset_index(drop=True)
 
 # -------------------- Filters / KPIs / Charts -------------------
 
-# Filter panel removed: always use full DataFrame without sidebar filters
+# Use the full dataframe with no sidebar filters
 df_view = df.copy()
+
 
 # ------------------------------------------------------------------
 # Conditional rendering based on the selected analysis.
