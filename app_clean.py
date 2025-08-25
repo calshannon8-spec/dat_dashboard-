@@ -569,24 +569,9 @@ df = df.sort_values(by="% of Mkt Cap", ascending=False).reset_index(drop=True)
 
 # -------------------- Filters / KPIs / Charts -------------------
 
-# Filter panel in the sidebar
-st.sidebar.markdown("### Filters")
-if "exchange" in df.columns:
-    _ex_opts = sorted([e for e in df["exchange"].dropna().unique().tolist() if e != ""])
-    _ex_sel = st.sidebar.multiselect("Exchange", _ex_opts, default=_ex_opts or [])
-    df_view = df[df["exchange"].isin(_ex_sel)] if _ex_sel else df.copy()
-else:
-    df_view = df.copy()
+# Use the full dataframe with no sidebar filters
+df_view = df.copy()
 
-_mc_min = float(df_view["Mkt Cap (USD)"].min() if not df_view.empty else 0.0)
-_mc_max = float(df_view["Mkt Cap (USD)"].max() if not df_view.empty else 0.0)
-_lo, _hi = st.sidebar.slider(
-    "Market Cap (USD, millions)",
-    min_value=0.0,
-    max_value=max(1.0, _mc_max / 1e6),
-    value=(0.0, max(1.0, _mc_max / 1e6)),
-)
-df_view = df_view[(df_view["Mkt Cap (USD)"] >= _lo * 1e6) & (df_view["Mkt Cap (USD)"] <= _hi * 1e6)]
 
 # ------------------------------------------------------------------
 # Conditional rendering based on the selected analysis.
